@@ -8,42 +8,60 @@ const collect = require('stream-collector')
 const ram = require('random-access-memory')
 
 // example
-const peer1 = createApp()
-const peer2 = createApp()
+const peer1 = createApp('p1')
+const peer2 = createApp('p2')
 ready(peer1, peer2, example)
-function example () {
+async function example () {
   // replicate both peers in live mode.
   replicate(peer1, peer2)
 
   // append some data on peer1.
   peer1.feeds.writer((err, feed) => {
     if (err) return console.error(err)
-    feed.append({
-      name: 'first',
-      timestamp: Date.now(),
-      topics: ['red', 'blue']
-    })
-    feed.append({
-      name: 'second',
-      timestamp: Date.now() - 3600 * 24 * 30,
-      topics: ['red', 'green']
-    })
+    feed.append([
+      {
+        name: 'first',
+        timestamp: Date.now(),
+        topics: ['red', 'green']
+      },
+      {
+        name: 'second',
+        timestamp: Date.now() - 3600 * 24 * 30,
+        topics: ['blue', 'yellow']
+      },
+      {
+        name: 'third',
+        timestamp: Date.now() - 3600 * 24 * 30 * 2,
+        topics: ['red', 'blue']
+      }
+    ])
+
     // Peer2 is still empty at this point, it's all sparse mode!
     setTimeout(() => {
       // Now peer2 sends a query to its peers for some data.
       // Comment out the next line - and see how now results below will be gone!
-      peer2.remoteQuery('topics', { topic: 'green' })
+
+      queryTopicsLocally(peer2, 'red', (err, result) => {
+        logResult(result, 'before remote query')
+      })
+
+      peer2.remoteQuery('topics', { topic: 'red' })
       setTimeout(() => {
-        // Now query for data on peer2!
-        peer2.kappa.ready('topics', () => {
-          collect(peer2.kappa.view.topics.query({ topic: 'green' }), console.log)
+        queryTopicsLocally(peer2, 'red', (err, result) => {
+          logResult(result, 'after remote query')
         })
-      }, 100)
-    }, 100)
+      }, 200)
+    }, 200)
   })
+
+  function queryTopicsLocally (peer, topic, cb) {
+    peer.kappa.view.topics.ready(() => {
+      collect(peer.kappa.view.topics.query({ topic }).pipe(peer.indexer.createLoadStream()), cb)
+    })
+  }
 }
 
-function createApp () {
+function createApp (name) {
   // We need a couple of leveldbs for state and view persistence.
   const dbs = {
     indexer: mem(),
@@ -63,7 +81,8 @@ function createApp () {
   // for download and append events, and keep a global local log of all
   // key@seq pairs ("feed ids").
   const indexer = new Indexer({
-    db: dbs.indexer
+    db: dbs.indexer,
+    name
   })
 
   // Let's add all the feeds from the multifeed to our indexer.
@@ -204,4 +223,12 @@ function keyToBuffer () {
       next()
     }
   })
+}
+
+function logResult (result, msg) {
+  console.log(msg)
+  console.log('------')
+  let str = result.map(r => `${r.key.substring(0, 4)} @ ${r.seq} --> "${r.value.name}" (${r.value.topics.join(', ')})`).join('\n')
+  console.log(str || 'empty')
+  console.log()
 }

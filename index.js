@@ -1,15 +1,17 @@
 const State = require('kappa-core/sources/util/state')
 const sub = require('subleveldown')
 const Log = require('./lib/log')
-const { Writable } = require('stream')
+const collect = require('stream-collector')
+const { Writable, Transform } = require('stream')
 
 module.exports = class Indexer {
   constructor (opts) {
     const { db } = opts
+    this.name = opts.name
     this.state = new State({
       db: sub(db, 's')
     })
-    this.log = new Log(sub(db, 'l'))
+    this.log = new Log(sub(db, 'l'), this.name)
     this.maxBatch = opts.maxBatch || 50
     this._feeds = []
     this._listeners = []
@@ -23,9 +25,9 @@ module.exports = class Indexer {
       feed.on('append', () => this._onappend(feed))
       feed.on('download', (seq) => this._ondownload(feed, seq))
 
-      if (opts.scan) {
-        this._scan(feed)
-      }
+      // if (opts.scan) {
+      //   this._scan(feed)
+      // }
     })
   }
 
@@ -46,6 +48,9 @@ module.exports = class Indexer {
   }
 
   _onappend (feed) {
+    // console.log('ONAPPEND', this.name)
+    // Ignore onappend events for remote feeds.
+    if (!feed.writable) return
     const key = feed.key.toString('hex')
     const seq = feed.length
     this.log.head(key, (err, last) => {
@@ -54,18 +59,16 @@ module.exports = class Indexer {
       for (let i = last + 1; i <= seq; i++) {
         this.log.append(key, i)
       }
-      this.log.flush()
-      this.onupdate(key)
+      this.log.flush(() => this.onupdate())
     })
   }
 
   _ondownload (feed, seq, data) {
     const key = feed.key.toString('hex')
     this.log.has(key, seq, (err, has) => {
-      if (err || !has) {
+      if (!has) {
         this.log.append(key, seq)
-        this.log.flush()
-        this.onupdate()
+        this.log.flush(() => this.onupdate())
       }
     })
   }
@@ -76,6 +79,8 @@ module.exports = class Indexer {
 
   download (key, seq) {
     key = hex(key)
+    seq = Number(seq)
+    // console.log('download', { key, seq })
     if (!this._feeds[key]) return
     this._feeds[key].download(seq)
   }
@@ -110,8 +115,24 @@ module.exports = class Indexer {
   }
 
   load (key, seq, cb) {
+    key = hex(key)
     if (!this._feeds[key]) return cb(new Error('Feed unavailable: ' + key))
-    this._feeds[key].get(seq, cb)
+    this._feeds[key].get(seq, { wait: false }, cb)
+  }
+
+  createLoadStream () {
+    const self = this
+    return new Transform({
+      objectMode: true,
+      transform (row, enc, next) {
+        self.load(row.key, row.seq, (err, value) => {
+          if (err) {} // TODO: Handle?
+          row.value = value
+          this.push(row)
+          next()
+        })
+      }
+    })
   }
 
   source () {
@@ -128,7 +149,7 @@ module.exports = class Indexer {
       },
       transform (msgs, next) {
         if (!msgs.length) return next(msgs)
-        let pending = msgs.length - 1
+        let pending = msgs.length
         for (let i = 0; i < msgs.length; i++) {
           const msg = msgs[i]
           self.load(msg.key, msg.seq, (err, value) => {
@@ -140,6 +161,9 @@ module.exports = class Indexer {
         function done () {
           if (--pending === 0) next(msgs)
         }
+      },
+      api: {
+        indexer: self
       }
     }
   }
