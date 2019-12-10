@@ -38,25 +38,28 @@ async function example () {
 
     // Peer2 is still empty at this point, it's all sparse mode!
     setTimeout(() => {
-      // Now peer2 sends a query to its peers for some data.
-      // Comment out the next line - and see how now results below will be gone!
-
       queryTopicsLocally(peer2, 'red', (err, result) => {
-        logResult(result, 'before remote query')
+        logResult(result, '"red" on peer2 before remote query')
+        // console.log('downloaded:', peer2.feeds.feeds().map(f => f.downloaded()))
       })
 
+      // Now peer2 sends a query to its peers for some data.
+      // Comment out the next line - and see how now results below will be gone!
       peer2.remoteQuery('topics', { topic: 'red' })
       setTimeout(() => {
         queryTopicsLocally(peer2, 'red', (err, result) => {
-          logResult(result, 'after remote query')
+          logResult(result, '"red" on peer2 after remote query')
+          // console.log('downloaded:', peer2.feeds.feeds().map(f => f.downloaded()))
         })
       }, 200)
     }, 200)
   })
 
   function queryTopicsLocally (peer, topic, cb) {
-    peer.kappa.view.topics.ready(() => {
-      collect(peer.kappa.view.topics.query({ topic }).pipe(peer.indexer.createLoadStream()), cb)
+    setImmediate(() => {
+      peer.kappa.view.topics.ready(() => {
+        collect(peer.kappa.view.topics.query({ topic }).pipe(peer.indexer.createLoadStream()), cb)
+      })
     })
   }
 }
