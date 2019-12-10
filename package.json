@@ -1,0 +1,27 @@
+{
+  "dependencies": {
+    "hypercore-query-extension": "^1.1.0",
+    "kappa-core": "github:Frando/kappa-core#kappa5-new",
+    "multifeed": "^5.1.1",
+    "stream-collector": "^1.0.1",
+    "subleveldown": "^4.1.4"
+  },
+  "devDependencies": {
+    "level-mem": "^5.0.1",
+    "random-access-memory": "^3.1.1",
+    "tape": "^4.11.0"
+  },
+  "name": "kappa-sparse-indexer",
+  "version": "0.0.1",
+  "main": "index.js",
+  "directories": {
+    "lib": "lib"
+  },
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "GPL-3.0",
+  "description": ""
+}
