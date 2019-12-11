@@ -1,8 +1,8 @@
 const State = require('kappa-core/sources/util/state')
 const sub = require('subleveldown')
-const Log = require('./lib/log')
-const collect = require('stream-collector')
 const { Writable, Transform } = require('stream')
+const Log = require('./lib/log')
+const Lock = require('mutexify')
 
 module.exports = class Indexer {
   constructor (opts) {
@@ -15,6 +15,7 @@ module.exports = class Indexer {
     this.maxBatch = opts.maxBatch || 50
     this._feeds = []
     this._listeners = []
+    this._lock = Lock()
   }
 
   add (feed, opts = {}) {
@@ -22,8 +23,9 @@ module.exports = class Indexer {
       const key = feed.key.toString('hex')
       if (this._feeds[key]) return
       this._feeds[key] = feed
-      feed.on('append', () => this._onappend(feed))
-      feed.on('download', (seq) => this._ondownload(feed, seq))
+      console.log('ADD', key)
+      if (feed.writable) feed.on('append', () => this._onappend(feed))
+      else feed.on('download', (seq) => this._ondownload(feed, seq))
 
       // if (opts.scan) {
       //   this._scan(feed)
@@ -48,28 +50,42 @@ module.exports = class Indexer {
   }
 
   _onappend (feed) {
-    // console.log('ONAPPEND', this.name)
-    // Ignore onappend events for remote feeds.
-    if (!feed.writable) return
-    const key = feed.key.toString('hex')
-    const seq = feed.length
-    this.log.head(key, (err, last) => {
-      if (err || !last) last = -1
-      if (seq <= last) return
-      for (let i = last + 1; i <= seq; i++) {
-        this.log.append(key, i)
-      }
-      this.log.flush(() => this.onupdate())
+    this._lock(release => {
+      // console.log('ONAPPEND', this.name)
+      // Ignore onappend events for remote feeds.
+      if (!feed.writable) return release()
+      const key = feed.key.toString('hex')
+      const seq = feed.length
+      this.log.head(key, (err, last) => {
+        if (err || !last) last = -1
+        if (seq <= last) return release()
+        for (let i = last + 1; i <= seq; i++) {
+          this.log.append(key, i)
+        }
+        this.log.flush(() => {
+          release()
+          this.onupdate()
+        })
+      })
     })
   }
 
+  // TODO: Those can come in very fast. Possibly
+  // collecting  the records while being locked
+  // would be better.
   _ondownload (feed, seq, data) {
-    const key = feed.key.toString('hex')
-    this.log.has(key, seq, (err, has) => {
-      if (!has) {
-        this.log.append(key, seq)
-        this.log.flush(() => this.onupdate())
-      }
+    this._lock(release => {
+      const key = feed.key.toString('hex')
+      this.log.has(key, seq, (err, has) => {
+        if (err) {}
+        if (!has) {
+          this.log.append(key, seq)
+          this.log.flush(() => {
+            release()
+            this.onupdate()
+          })
+        }
+      })
     })
   }
 
