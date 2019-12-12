@@ -3,6 +3,7 @@ const sub = require('subleveldown')
 const { Writable, Transform } = require('stream')
 const Log = require('./lib/log')
 const Lock = require('mutexify')
+const debug = require('debug')('indexer')
 
 module.exports = class Indexer {
   constructor (opts) {
@@ -23,13 +24,13 @@ module.exports = class Indexer {
       const key = feed.key.toString('hex')
       if (this._feeds[key]) return
       this._feeds[key] = feed
-      console.log('ADD', key)
       if (feed.writable) feed.on('append', () => this._onappend(feed))
       else feed.on('download', (seq) => this._ondownload(feed, seq))
+      debug('add feed %s (scan: %s)', key, opts.scan)
 
-      // if (opts.scan) {
-      //   this._scan(feed)
-      // }
+      if (opts.scan) {
+        this._scan(feed)
+      }
     })
   }
 

@@ -1,21 +1,22 @@
-const Materialized = require('./lib/log')
+const Materialized = require('../lib/log')
 const mem = require('level-mem')
 const tape = require('tape')
 
 tape('log', t => {
   const log = new Materialized(mem())
-  log.append('alpha', 1)
-  log.append('beta', 5)
-  log.append('gamma', 2)
-  log.append('gamma', 1)
-  log.append('beta', 4)
+  log.append('A', 1)
+  log.append('B', 5)
+  log.append('C', 2)
+  log.append('C', 1)
+  log.append('B', 4)
   log.flush(() => {
     log.read(2, 4, (err, res) => {
       t.error(err)
-      console.log('log 2-4', res)
+      res = res.map(r => r.key + r.seq).join(' ')
+      t.equal(res, 'B5 C2 C1')
       log.heads((err, heads) => {
         t.error(err)
-        console.log('heads', heads)
+        t.deepEqual(heads, { A: 1, B: 5, C: 2 })
         t.end()
       })
     })

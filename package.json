@@ -1,12 +1,12 @@
 {
   "name": "kappa-sparse-indexer",
-  "version": "0.0.2",
+  "version": "0.1.0",
   "main": "index.js",
   "directories": {
     "lib": "lib"
   },
   "scripts": {
-    "test": "node test.js"
+    "test": "tape test/*.js"
   },
   "keywords": [],
   "author": "Frando",
