@@ -35,6 +35,7 @@ module.exports = class Indexer {
   }
 
   _scan (feed) {
+    const self = this
     const key = feed.key.toString('hex')
     let max = feed.length
     let pending = 1
@@ -46,7 +47,7 @@ module.exports = class Indexer {
     }
     done()
     function done () {
-      if (--pending === 0) this.log.flush()
+      if (--pending === 0) self.log.flush()
     }
   }
 
