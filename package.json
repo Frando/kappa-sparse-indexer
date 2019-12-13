@@ -1,6 +1,6 @@
 {
   "name": "kappa-sparse-indexer",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "main": "index.js",
   "directories": {
     "lib": "lib"
@@ -13,6 +13,7 @@
   "license": "GPL-3.0",
   "description": "A sparse indexer for hypercores and kappa-core",
   "dependencies": {
+    "debug": "^4.1.1",
     "hypercore-query-extension": "^1.1.0",
     "mutexify": "^1.2.0",
     "stream-collector": "^1.0.1",
