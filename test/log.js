@@ -14,7 +14,7 @@ tape('log', t => {
       t.error(err)
       res = res.map(r => r.key + r.seq).join(' ')
       t.equal(res, 'B5 C2 C1')
-      log.heads((err, heads) => {
+      log.keyheads((err, heads) => {
         t.error(err)
         t.deepEqual(heads, { A: 1, B: 5, C: 2 })
         t.end()

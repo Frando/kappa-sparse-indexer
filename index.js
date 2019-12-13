@@ -1,22 +1,28 @@
-const State = require('kappa-core/sources/util/state')
 const sub = require('subleveldown')
 const { Writable, Transform } = require('stream')
-const Log = require('./lib/log')
-const Lock = require('mutexify')
+const mutex = require('mutexify')
 const debug = require('debug')('indexer')
+
+const Log = require('./lib/log')
+const State = require('./lib/state')
 
 module.exports = class Indexer {
   constructor (opts) {
     const { db } = opts
     this.name = opts.name
-    this.state = new State({
-      db: sub(db, 's')
-    })
-    this.log = new Log(sub(db, 'l'), this.name)
+    this._statedb = sub(db, 's')
+    this._logdb = sub(db, 'l')
+
+    this.log = new Log(this._logdb, this.name)
+
     this.maxBatch = opts.maxBatch || 50
     this._feeds = []
-    this._listeners = []
-    this._lock = Lock()
+    this._watchers = []
+    this._lock = mutex()
+  }
+
+  watch (fn) {
+    this._watchers.push(fn)
   }
 
   add (feed, opts = {}) {
@@ -53,15 +59,14 @@ module.exports = class Indexer {
 
   _onappend (feed) {
     this._lock(release => {
-      // console.log('ONAPPEND', this.name)
       // Ignore onappend events for remote feeds.
       if (!feed.writable) return release()
       const key = feed.key.toString('hex')
-      const seq = feed.length
-      this.log.head(key, (err, last) => {
-        if (err || !last) last = -1
-        if (seq <= last) return release()
-        for (let i = last + 1; i <= seq; i++) {
+      const len = feed.length
+      this.log.keyhead(key, (err, head) => {
+        if (err) head = -1
+        if (!(len > head)) return release()
+        for (let i = head + 1; i < len; i++) {
           this.log.append(key, i)
         }
         this.log.flush(() => {
@@ -79,6 +84,7 @@ module.exports = class Indexer {
     this._lock(release => {
       const key = feed.key.toString('hex')
       this.log.has(key, seq, (err, has) => {
+        // TODO: Emit somewhere?
         if (err) {}
         if (!has) {
           this.log.append(key, seq)
@@ -86,19 +92,18 @@ module.exports = class Indexer {
             release()
             this.onupdate()
           })
-        }
+        } else release()
       })
     })
   }
 
   onupdate () {
-    this._listeners.forEach(fn => fn())
+    this._watchers.forEach(fn => fn())
   }
 
   download (key, seq) {
     key = hex(key)
     seq = Number(seq)
-    // console.log('download', { key, seq })
     if (!this._feeds[key]) return
     this._feeds[key].download(seq)
   }
@@ -114,19 +119,18 @@ module.exports = class Indexer {
     })
   }
 
-  _pull (name, next) {
-    this.state.get(name, (err, stateseq) => {
+  pull (start, end, next) {
+    if (end <= start) return next()
+    this.log.head((err, head) => {
       if (err) return next()
-      this.log.length((err, headseq) => {
-        if (err || headseq === stateseq) return next()
-        const to = Math.min(stateseq + this.maxBatch, headseq)
-        this.log.read(stateseq, to, (err, messages) => {
-          if (err) return next()
-          next({
-            messages,
-            finished: to === headseq,
-            onindexed: cb => this.state.put(name, to, cb)
-          })
+      if (start > head) return next()
+      const to = Math.min(end, head)
+      this.log.read(start, to, (err, messages) => {
+        if (err) return next()
+        next({
+          messages,
+          head,
+          seq: to
         })
       })
     })
@@ -153,36 +157,64 @@ module.exports = class Indexer {
     })
   }
 
-  source () {
-    const self = this
-    let name
+  source (opts) {
+    return new IndexerSource(this, this._statedb, opts)
+  }
+}
+
+class IndexerSource {
+  constructor (idx, db, opts = {}) {
+    this.idx = idx
+    this.db = db
+    this.maxBatch = opts.maxBatch || 50
+  }
+
+  open (flow, next) {
+    this.name = flow.name
+    this.state = new State(this.db, this.name)
+    this.idx.watch(() => flow.update())
+    next()
+  }
+
+  pull (next) {
+    this.state.get((err, lastseq) => {
+      if (err) return next()
+      const end = lastseq + this.maxBatch
+      this.idx.pull(lastseq + 1, end, (result) => {
+        if (err || !result) return next()
+        const { messages, seq, head } = result
+        next({
+          messages,
+          finished: seq === head,
+          onindexed: cb => this.state.put(seq, cb)
+        })
+      })
+    })
+  }
+
+  transform (msgs, next) {
+    if (!msgs.length) return next(msgs)
+    let pending = msgs.length
+    for (let i = 0; i < msgs.length; i++) {
+      const msg = msgs[i]
+      this.idx.load(msg.key, msg.seq, (err, value) => {
+        // TODO: Emit somewhere?
+        if (err) {}
+        msg.value = value
+        done()
+      })
+    }
+    function done () {
+      if (--pending === 0) next(msgs)
+    }
+  }
+
+  get reset () { return this.state.reset }
+  get storeVersion () { return this.state.storeVersion }
+  get fetchVersion () { return this.state.fetchVersion }
+  get api () {
     return {
-      open (flow, next) {
-        name = flow.name
-        self._listeners.push(() => flow.update())
-        next()
-      },
-      pull (next) {
-        self._pull(name, next)
-      },
-      transform (msgs, next) {
-        if (!msgs.length) return next(msgs)
-        let pending = msgs.length
-        for (let i = 0; i < msgs.length; i++) {
-          const msg = msgs[i]
-          self.load(msg.key, msg.seq, (err, value) => {
-            if (err) {}
-            msg.value = value
-            done()
-          })
-        }
-        function done () {
-          if (--pending === 0) next(msgs)
-        }
-      },
-      api: {
-        indexer: self
-      }
+      indexer: this.idx
     }
   }
 }
