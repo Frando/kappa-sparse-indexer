@@ -59,8 +59,6 @@ module.exports = class Indexer {
 
   _onappend (feed) {
     this._lock(release => {
-      // Ignore onappend events for remote feeds.
-      if (!feed.writable) return release()
       const key = feed.key.toString('hex')
       const len = feed.length
       this.log.keyhead(key, (err, head) => {
