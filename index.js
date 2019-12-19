@@ -25,7 +25,11 @@ module.exports = class Indexer {
     this._watchers.push(fn)
   }
 
-  add (feed, opts = {}) {
+  add (feed, opts = {}, cb) {
+    if (typeof opts === 'function') {
+      cb = opts
+      opts = {}
+    }
     feed.ready(() => {
       const key = feed.key.toString('hex')
       if (this._feeds[key]) return
@@ -37,6 +41,7 @@ module.exports = class Indexer {
       if (opts.scan) {
         this._scan(feed)
       }
+      if (cb) cb()
     })
   }
 
