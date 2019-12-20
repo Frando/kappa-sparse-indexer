@@ -1,5 +1,5 @@
 const sub = require('subleveldown')
-const { Writable, Transform } = require('stream')
+const { Writable } = require('stream')
 const mutex = require('mutexify')
 const debug = require('debug')('indexer')
 
@@ -8,10 +8,10 @@ const State = require('./lib/state')
 
 module.exports = class Indexer {
   constructor (opts) {
-    const { db } = opts
+    // The name is, at the moment, only for debug purposes.
     this.name = opts.name
-    this._statedb = sub(db, 's')
-    this._logdb = sub(db, 'l')
+    this._statedb = sub(opts.db, 's')
+    this._logdb = sub(opts.db, 'l')
 
     this.log = new Log(this._logdb, this.name)
 
@@ -19,10 +19,17 @@ module.exports = class Indexer {
     this._feeds = []
     this._watchers = []
     this._lock = mutex()
+
+    this._transform = opts.transform
   }
 
   watch (fn) {
     this._watchers.push(fn)
+  }
+
+  feed (key) {
+    if (Buffer.isBuffer(key)) key = key.toString('hex')
+    return this._feeds[key]
   }
 
   add (feed, opts = {}, cb) {
@@ -50,7 +57,7 @@ module.exports = class Indexer {
     const key = feed.key.toString('hex')
     let max = feed.length
     let pending = 1
-    for (let i = 0; i <= max; i++) {
+    for (let i = 0; i < max; i++) {
       if (!feed.bitfield.get(i)) {
         pending++
         this.log.add(key, i, done)
@@ -129,6 +136,7 @@ module.exports = class Indexer {
       if (start > head) return next()
       const to = Math.min(end, head)
       this.log.read(start, to, (err, messages) => {
+        debug('pull %s: from %s to %s: %s msgs [@%s]', this.name, start, to, messages.length, head)
         if (err) return next()
         next({
           messages,
@@ -139,25 +147,8 @@ module.exports = class Indexer {
     })
   }
 
-  load (key, seq, cb) {
-    key = hex(key)
-    if (!this._feeds[key]) return cb(new Error('Feed unavailable: ' + key))
-    this._feeds[key].get(seq, { wait: false }, cb)
-  }
-
-  createLoadStream () {
-    const self = this
-    return new Transform({
-      objectMode: true,
-      transform (row, enc, next) {
-        self.load(row.key, row.seq, (err, value) => {
-          if (err) {} // TODO: Handle?
-          row.value = value
-          this.push(row)
-          next()
-        })
-      }
-    })
+  head (cb) {
+    this.log.head(cb)
   }
 
   source (opts) {
@@ -196,20 +187,8 @@ class IndexerSource {
   }
 
   transform (msgs, next) {
-    if (!msgs.length) return next(msgs)
-    let pending = msgs.length
-    for (let i = 0; i < msgs.length; i++) {
-      const msg = msgs[i]
-      this.idx.load(msg.key, msg.seq, (err, value) => {
-        // TODO: Emit somewhere?
-        if (err) {}
-        msg.value = value
-        done()
-      })
-    }
-    function done () {
-      if (--pending === 0) next(msgs)
-    }
+    if (this.idx._transform) this.idx._transform(msgs, next)
+    else next(msgs)
   }
 
   get reset () { return this.state.reset }
