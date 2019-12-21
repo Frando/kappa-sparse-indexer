@@ -1,5 +1,5 @@
 const sub = require('subleveldown')
-const { Writable } = require('stream')
+const { Writable, Transform } = require('stream')
 const mutex = require('mutexify')
 const debug = require('debug')('indexer')
 
@@ -10,6 +10,8 @@ module.exports = class Indexer {
   constructor (opts) {
     // The name is, at the moment, only for debug purposes.
     this.name = opts.name
+    this.opts = opts
+
     this._statedb = sub(opts.db, 's')
     this._logdb = sub(opts.db, 'l')
 
@@ -20,7 +22,7 @@ module.exports = class Indexer {
     this._watchers = []
     this._lock = mutex()
 
-    this._transform = opts.transform
+    if (typeof opts.loadValue !== 'undefined') this._loadValue = opts.loadValue
   }
 
   watch (fn) {
@@ -129,6 +131,12 @@ module.exports = class Indexer {
     })
   }
 
+  // createReadStream (opts) {
+  //   const { start = 0, end = Infinity } = opts
+  //   return this.log.createReadStream(start, end)
+  //     .pipe(this.createLoadStream())
+  // }
+
   pull (start, end, next) {
     if (end <= start) return next()
     this.log.head((err, head) => {
@@ -138,17 +146,69 @@ module.exports = class Indexer {
       this.log.read(start, to, (err, messages) => {
         debug('pull %s: from %s to %s: %s msgs [@%s]', this.name, start, to, messages.length, head)
         if (err) return next()
-        next({
-          messages,
-          head,
-          seq: to
+        this._transform(messages, messages => {
+          next({
+            messages,
+            head,
+            seq: to
+          })
         })
       })
     })
   }
 
+  _transform (messages, next) {
+    const self = this
+    if (!messages.length) return next(messages)
+    if (this.opts.loadValue === false) return next(messages)
+    const _messages = messages
+    messages = []
+    let pending = _messages.length
+    _messages.forEach(msg => this.loadValue(msg, done))
+    function done (err, msg) {
+      if (err) {}
+      if (msg) messages.push(msg)
+      if (--pending !== 0) return
+      if (self.opts.transform) self.opts.transform(messages, next)
+      else next(messages)
+    }
+  }
+
   head (cb) {
     this.log.head(cb)
+  }
+
+  // This can be overridden with opts.loadValue.
+  // If the materialized log contains feeds not in the active set
+  // this is required to return their values.
+  _loadValue (key, seq, cb) {
+    if (Buffer.isBuffer(key)) key = key.toString('hex')
+    const feed = this.feed(key)
+    if (!feed) return cb()
+    feed.get(seq, { wait: false }, cb)
+  }
+
+  loadValue (message, cb) {
+    if (this.opts.loadValue) return this.opts.loadValue(message.key, message.seq, cb)
+    this._loadValue(message.key, message.seq, (err, value) => {
+      if (err) return cb(err)
+      message.value = value
+      cb(null, message)
+    })
+  }
+
+  createLoadStream () {
+    const self = this
+    return new Transform({
+      objectMode: true,
+      transform (row, enc, next) {
+        self.loadValue(row, (err, row) => {
+          if (err) {} // TODO: Handle?
+          this.push(row)
+          next()
+        })
+      }
+    })
   }
 
   source (opts) {
@@ -184,11 +244,6 @@ class IndexerSource {
         })
       })
     })
-  }
-
-  transform (msgs, next) {
-    if (this.idx._transform) this.idx._transform(msgs, next)
-    else next(msgs)
   }
 
   get reset () { return this.state.reset }
