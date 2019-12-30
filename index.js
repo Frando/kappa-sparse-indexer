@@ -40,18 +40,22 @@ module.exports = class Indexer {
       opts = {}
     }
     feed.ready(() => {
-      const key = feed.key.toString('hex')
-      if (this._feeds[key]) return
-      this._feeds[key] = feed
-      if (feed.writable) feed.on('append', () => this._onappend(feed))
-      else feed.on('download', (seq) => this._ondownload(feed, seq))
-      debug('add feed %s (scan: %s)', key, opts.scan)
-
-      if (opts.scan) {
-        this._scan(feed)
-      }
+      this.addReady(feed, opts)
       if (cb) cb()
     })
+  }
+
+  addReady (feed, opts = {}) {
+    const key = feed.key.toString('hex')
+    if (this._feeds[key]) return
+    this._feeds[key] = feed
+    if (feed.writable) feed.on('append', () => this._onappend(feed))
+    else feed.on('download', (seq) => this._ondownload(feed, seq))
+    debug('add feed %s (scan: %s)', key, opts.scan)
+
+    if (opts.scan) {
+      this._scan(feed)
+    }
   }
 
   _scan (feed) {
