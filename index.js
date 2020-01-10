@@ -25,6 +25,12 @@ module.exports = class Indexer {
     if (typeof opts.loadValue !== 'undefined') this._loadValue = opts.loadValue
   }
 
+  ready (cb) {
+    this._lock(release => {
+      release(cb)
+    })
+  }
+
   watch (fn) {
     this._watchers.push(fn)
   }
@@ -254,8 +260,12 @@ class IndexerSource {
   get storeVersion () { return this.state.storeVersion }
   get fetchVersion () { return this.state.fetchVersion }
   get api () {
+    const self = this
     return {
-      indexer: this.idx
+      ready (kappa, cb) {
+        self.idx.ready(cb)
+      },
+      indexer: self.idx
     }
   }
 }
