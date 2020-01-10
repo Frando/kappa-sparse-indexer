@@ -233,6 +233,10 @@ class IndexerSource {
     this.maxBatch = opts.maxBatch || 50
   }
 
+  ready (cb) {
+    this.idx.ready(cb)
+  }
+
   open (flow, next) {
     this.name = flow.name
     this.state = new State(this.db, this.name)
@@ -263,7 +267,7 @@ class IndexerSource {
     const self = this
     return {
       ready (kappa, cb) {
-        self.idx.ready(cb)
+        self.ready(cb)
       },
       indexer: self.idx
     }
