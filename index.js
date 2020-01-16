@@ -126,29 +126,11 @@ module.exports = class Indexer {
     this._watchers.forEach(fn => fn())
   }
 
-  download (key, seq) {
-    key = hex(key)
-    seq = Number(seq)
-    if (!this._feeds[key]) return
-    this._feeds[key].download(seq)
+  createReadStream (opts = {}) {
+    const { start = 0, end = Infinity } = opts
+    return this.log.createReadStream(start, end)
+      .pipe(this.createLoadStream())
   }
-
-  createDownloadRequestStream () {
-    const self = this
-    return new Writable({
-      objectMode: true,
-      write (row, enc, next) {
-        self.download(row.key, row.seq)
-        next()
-      }
-    })
-  }
-
-  // createReadStream (opts) {
-  //   const { start = 0, end = Infinity } = opts
-  //   return this.log.createReadStream(start, end)
-  //     .pipe(this.createLoadStream())
-  // }
 
   pull (start, end, opts = {}, next) {
     if (typeof opts === 'function') {

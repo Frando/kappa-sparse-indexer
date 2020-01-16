@@ -3,7 +3,7 @@ const Query = require('hypercore-query-extension')
 const Kappa = require('kappa-core')
 const Indexer = require('.')
 const mem = require('level-mem')
-const { Transform } = require('stream')
+const { Transform, Writable } = require('stream')
 const collect = require('stream-collector')
 const ram = require('random-access-memory')
 
@@ -128,7 +128,7 @@ function createApp (name) {
   function remoteQuery (name, args) {
     args = JSON.stringify(args)
     const results = query.query(name, args)
-    results.pipe(indexer.createDownloadRequestStream())
+    results.pipe(downloadBlocks(feeds))
   }
 
   // This is our "app":
@@ -203,6 +203,17 @@ function createRecentView (db) {
       }
     }
   }
+}
+
+function downloadBlocks (feeds) {
+  return new Writable({
+    objectMode: true,
+    write (row, enc, next) {
+      const feed = feeds.feed(row.key)
+      if (feed) feed.download(Number(row.seq))
+      next()
+    }
+  })
 }
 
 function keyseqFromKey () {

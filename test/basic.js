@@ -3,7 +3,7 @@ const Query = require('hypercore-query-extension')
 const Kappa = require('kappa-core')
 const Indexer = require('..')
 const mem = require('level-mem')
-const { Transform } = require('stream')
+const { Transform, Writable } = require('stream')
 const collect = require('stream-collector')
 const ram = require('random-access-memory')
 
@@ -70,6 +70,22 @@ tape('basics', t => {
         t.deepEqual(downloaded, [2], 'dl is 2')
         // logResult(result, '"red" on peer2 after remote query')
         // console.log('downloaded:', peer2.feeds.feeds().map(f => f.downloaded()))
+        cb()
+      })
+    },
+    cb => {
+      const rs = peer1.indexer.createReadStream()
+      collect(rs, (err, res) => {
+        t.error(err)
+        t.equal(res.length, 3)
+        cb()
+      })
+    },
+    cb => {
+      const rs = peer2.indexer.createReadStream()
+      collect(rs, (err, res) => {
+        t.error(err)
+        t.equal(res.length, 2)
         cb()
       })
     },
@@ -149,7 +165,7 @@ function createApp (name) {
   function remoteQuery (name, args) {
     args = JSON.stringify(args)
     const results = query.query(name, args)
-    results.pipe(indexer.createDownloadRequestStream())
+    results.pipe(downloadBlocks(feeds))
   }
 
   // This is our "app":
@@ -166,6 +182,17 @@ function createApp (name) {
       return stream
     }
   }
+}
+
+function downloadBlocks (feeds) {
+  return new Writable({
+    objectMode: true,
+    write (row, enc, next) {
+      const feed = feeds.feed(row.key)
+      if (feed) feed.download(Number(row.seq))
+      next()
+    }
+  })
 }
 
 function createTopicsView (db) {
