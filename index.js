@@ -2,9 +2,12 @@ const sub = require('subleveldown')
 const { Writable, Transform } = require('stream')
 const mutex = require('mutexify')
 const debug = require('debug')('indexer')
+const pretty = require('pretty-hash')
 
 const Log = require('./lib/log')
 const State = require('./lib/state')
+
+const KAPPA_MAX_BATCH = 50
 
 module.exports = class Indexer {
   constructor (opts) {
@@ -57,7 +60,7 @@ module.exports = class Indexer {
     this._feeds[key] = feed
     if (feed.writable) feed.on('append', () => this._onappend(feed))
     else feed.on('download', (seq) => this._ondownload(feed, seq))
-    debug('add feed %s (scan: %s)', key, opts.scan)
+    debug('[%s] feed %s (scan: %s)', this.name, pretty(key), !!opts.scan)
 
     if (opts.scan) {
       this._scan(feed)
@@ -147,16 +150,21 @@ module.exports = class Indexer {
   //     .pipe(this.createLoadStream())
   // }
 
-  pull (start, end, next) {
+  pull (start, end, opts = {}, next) {
+    if (typeof opts === 'function') {
+      next = opts
+      opts = {}
+    }
+
     if (end <= start) return next()
     this.log.head((err, head) => {
       if (err) return next()
       if (start > head) return next()
       const to = Math.min(end, head)
       this.log.read(start, to, (err, messages) => {
-        debug('pull %s: from %s to %s: %s msgs [@%s]', this.name, start, to, messages.length, head)
+        // debug('[%s] pull: from %s to %s: %s msgs [@%s]', this.name, start, to, messages.length, head)
         if (err) return next()
-        this._transform(messages, messages => {
+        this._transform(messages, opts, messages => {
           next({
             messages,
             head,
@@ -167,9 +175,10 @@ module.exports = class Indexer {
     })
   }
 
-  _transform (messages, next) {
+  _transform (messages, opts, next) {
     const self = this
     if (!messages.length) return next(messages)
+    if (opts.filterKey) messages = messages.filter(m => opts.filterKey(m.key))
     if (this.opts.loadValue === false) return next(messages)
     const _messages = messages
     messages = []
@@ -191,7 +200,7 @@ module.exports = class Indexer {
   // This can be overridden with opts.loadValue.
   // If the materialized log contains feeds not in the active set
   // this is required to return their values.
-  _loadValue (key, seq, cb) {
+  _loadValueFromOpenFeeds (key, seq, cb) {
     if (Buffer.isBuffer(key)) key = key.toString('hex')
     const feed = this.feed(key)
     if (!feed) return cb()
@@ -200,7 +209,7 @@ module.exports = class Indexer {
 
   loadValue (message, cb) {
     if (this.opts.loadValue) return this.opts.loadValue(message.key, message.seq, cb)
-    this._loadValue(message.key, message.seq, (err, value) => {
+    this._loadValueFromOpenFeeds(message.key, message.seq, (err, value) => {
       if (err) return cb(err)
       message.value = value
       cb(null, message)
@@ -230,7 +239,8 @@ class IndexerSource {
   constructor (idx, db, opts = {}) {
     this.idx = idx
     this.db = db
-    this.maxBatch = opts.maxBatch || 50
+    this.opts = opts
+    if (!this.opts.maxBatch) this.opts.maxBatch = KAPPA_MAX_BATCH
   }
 
   ready (cb) {
@@ -247,8 +257,9 @@ class IndexerSource {
   pull (next) {
     this.state.get((err, lastseq) => {
       if (err) return next()
-      const end = lastseq + this.maxBatch
-      this.idx.pull(lastseq + 1, end, (result) => {
+      const end = lastseq + this.opts.maxBatch
+      const filterKey = this.opts.filterKey
+      this.idx.pull(lastseq + 1, end, { filterKey }, (result) => {
         if (err || !result) return next()
         const { messages, seq, head } = result
         next({
