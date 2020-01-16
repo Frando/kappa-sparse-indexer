@@ -186,16 +186,23 @@ module.exports = class Indexer {
     if (Buffer.isBuffer(key)) key = key.toString('hex')
     const feed = this.feed(key)
     if (!feed) return cb()
-    feed.get(seq, { wait: false }, cb)
+    feed.get(seq, { wait: false }, (err, value) => {
+      if (err) return cb(err)
+      cb(null, { value })
+    })
   }
 
   loadValue (message, cb) {
-    if (this.opts.loadValue) return this.opts.loadValue(message.key, message.seq, cb)
-    this._loadValueFromOpenFeeds(message.key, message.seq, (err, value) => {
+    if (this.opts.loadValue) this.opts.loadValue(message.key, message.seq, onvalue)
+    else this._loadValueFromOpenFeeds(message.key, message.seq, onvalue)
+
+    function onvalue (err, value) {
       if (err) return cb(err)
-      message.value = value
-      cb(null, message)
-    })
+      // TODO: This "monkey patches" the result from loadValue and the original
+      // message object with { key, seq, lseq } together. I'm not totally sure
+      // if that's what we want here, but it works well.
+      cb(null, { ...message, ...value })
+    }
   }
 
   createLoadStream () {
