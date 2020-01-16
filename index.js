@@ -128,8 +128,9 @@ module.exports = class Indexer {
 
   createReadStream (opts = {}) {
     const { start = 0, end = Infinity } = opts
-    return this.log.createReadStream(start, end)
-      .pipe(this.createLoadStream())
+    const rs = this.log.createReadStream(start, end)
+    if (opts.loadValue !== false) return rs.pipe(this.createLoadStream())
+    return rs
   }
 
   pull (start, end, opts = {}, next) {
@@ -162,16 +163,15 @@ module.exports = class Indexer {
     if (!messages.length) return next(messages)
     if (opts.filterKey) messages = messages.filter(m => opts.filterKey(m.key))
     if (this.opts.loadValue === false) return next(messages)
-    const _messages = messages
-    messages = []
-    let pending = _messages.length
-    _messages.forEach(msg => this.loadValue(msg, done))
+    const results = []
+    let pending = messages.length
+    messages.forEach(msg => this.loadValue(msg, done))
     function done (err, msg) {
       if (err) {}
-      if (msg) messages.push(msg)
+      if (msg) results.push(msg)
       if (--pending !== 0) return
-      if (self.opts.transform) self.opts.transform(messages, next)
-      else next(messages)
+      if (self.opts.transform) self.opts.transform(results, next)
+      else next(results)
     }
   }
 
