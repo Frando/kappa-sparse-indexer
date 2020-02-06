@@ -19,19 +19,22 @@ module.exports = class Indexer {
     this._logdb = sub(opts.db, 'l')
 
     this.log = new Log(this._logdb, this.name)
+    // TODO: This is async, should it be awaited somewhere?
+    this.log.init(noop)
 
     this.maxBatch = opts.maxBatch || 50
     this._feeds = []
     this._watchers = []
     this._lock = mutex()
-
-    if (typeof opts.loadValue !== 'undefined') this._loadValue = opts.loadValue
   }
 
   ready (cb) {
-    this._lock(release => {
-      release(cb)
-    })
+    // Acquire a lock so that running ops are finished, and release right away.
+    this._lock(release => release(cb))
+  }
+
+  get length () {
+    return this.log.length
   }
 
   watch (fn) {
@@ -43,23 +46,22 @@ module.exports = class Indexer {
     return this._feeds[key]
   }
 
-  add (feed, opts = {}, cb) {
-    if (typeof opts === 'function') {
-      cb = opts
-      opts = {}
-    }
-    feed.ready(() => {
+  add (feed, opts = {}) {
+    if (feed.opened) {
       this.addReady(feed, opts)
-      if (cb) cb()
-    })
+    } else {
+      feed.ready(() => this.addReady(feed, opts))
+    }
   }
 
   addReady (feed, opts = {}) {
     const key = feed.key.toString('hex')
     if (this._feeds[key]) return
     this._feeds[key] = feed
+
     if (feed.writable) feed.on('append', () => this._onappend(feed))
     else feed.on('download', (seq) => this._ondownload(feed, seq))
+
     debug('[%s] feed %s (scan: %s)', this.name, pretty(key), !!opts.scan)
 
     if (opts.scan) {
@@ -67,42 +69,40 @@ module.exports = class Indexer {
     }
   }
 
-  _scan (feed, cb) {
+  _appendAndFlush (key, seqs, cb) {
+    if (!seqs.length) return cb()
+    const rows = seqs.map(seq => [key, seq])
+    this.log.append(rows)
+    this.log.flush(() => {
+      // debug('[%s] feed %s appended %s', this.name, pretty(key), seqs.join(', '))
+      this.onupdate()
+      cb()
+    })
+  }
+
+  _scan (feed) {
     this._lock(release => {
-      const self = this
       const key = feed.key.toString('hex')
-      let max = feed.length
-      let pending = 1
-      for (let i = 0; i < max; i++) {
-        if (feed.bitfield.get(i)) {
-          pending++
-          this.log.add(key, i, done)
+      const feedLen = feed.length
+      // debug('[%s] feed %s SCAN len %s', this.name, pretty(key), feedLen)
+      const seqs = []
+      for (let seq = 0; seq < feedLen; seq++) {
+        if (feed.bitfield.get(seq)) {
+          seqs.push(seq)
         }
       }
-      done()
-      function done () {
-        if (--pending !== 0) return
-        self.log.flush(() => {
-          release(cb)
-        })
-      }
+      this._appendAndFlush(key, seqs, release)
     })
   }
 
   _onappend (feed) {
     this._lock(release => {
       const key = feed.key.toString('hex')
-      const len = feed.length
-      this.log.keyhead(key, (err, head) => {
-        if (err) head = -1
-        if (!(len > head)) return release()
-        for (let i = head + 1; i < len; i++) {
-          this.log.append(key, i)
-        }
-        this.log.flush(() => {
-          release()
-          this.onupdate()
-        })
+      const feedLen = feed.length
+      this.log.keyhead(key, (err, indexedLen) => {
+        if (err) indexedLen = -1
+        const seqs = range(indexedLen + 1, feedLen)
+        this._appendAndFlush(key, seqs, release)
       })
     })
   }
@@ -113,17 +113,7 @@ module.exports = class Indexer {
   _ondownload (feed, seq, data) {
     this._lock(release => {
       const key = feed.key.toString('hex')
-      this.log.has(key, seq, (err, has) => {
-        // TODO: Emit somewhere?
-        if (err) {}
-        if (!has) {
-          this.log.append(key, seq)
-          this.log.flush(() => {
-            release()
-            this.onupdate()
-          })
-        } else release()
-      })
+      this._appendAndFlush(key, [seq], release)
     })
   }
 
@@ -279,7 +269,14 @@ class IndexerSource {
   }
 }
 
-function hex (key) {
-  if (Buffer.isBuffer(key)) return key.toString('hex')
-  return key
+function noop () {}
+
+// from inclusive, to exclusive
+function range (from, to) {
+  let range = []
+  if (!(to > from)) return range
+  for (let i = from; i < to; i++) {
+    range.push(i)
+  }
+  return range
 }

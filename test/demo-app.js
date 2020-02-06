@@ -10,7 +10,7 @@ const ram = require('random-access-memory')
 const tape = require('tape')
 const { runAll, ready, replicate } = require('./lib/util')
 
-tape('basics', t => {
+tape('demo app', t => {
   const peer1 = createApp('p1')
   const peer2 = createApp('p2')
   runAll([
