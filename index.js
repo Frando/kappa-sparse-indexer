@@ -67,21 +67,26 @@ module.exports = class Indexer {
     }
   }
 
-  _scan (feed) {
-    const self = this
-    const key = feed.key.toString('hex')
-    let max = feed.length
-    let pending = 1
-    for (let i = 0; i < max; i++) {
-      if (!feed.bitfield.get(i)) {
-        pending++
-        this.log.add(key, i, done)
+  _scan (feed, cb) {
+    this._lock(release => {
+      const self = this
+      const key = feed.key.toString('hex')
+      let max = feed.length
+      let pending = 1
+      for (let i = 0; i < max; i++) {
+        if (feed.bitfield.get(i)) {
+          pending++
+          this.log.add(key, i, done)
+        }
       }
-    }
-    done()
-    function done () {
-      if (--pending === 0) self.log.flush()
-    }
+      done()
+      function done () {
+        if (--pending !== 0) return
+        self.log.flush(() => {
+          release(cb)
+        })
+      }
+    })
   }
 
   _onappend (feed) {
