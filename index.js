@@ -174,6 +174,14 @@ module.exports = class Indexer {
     this.log.head(cb)
   }
 
+  lseqToKeyseq (lseq, cb) {
+    this.log.lseqToKeyseq(lseq, cb)
+  }
+
+  keyseqToLseq (key, seq, cb) {
+    this.log.keyseqToLseq(key, seq, cb)
+  }
+
   // This can be overridden with opts.loadValue.
   // If the materialized log contains feeds not in the active set
   // this is required to return their values.
