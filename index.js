@@ -129,8 +129,8 @@ module.exports = class Indexer {
   }
 
   createReadStream (opts = {}) {
-    const { start = 0, end = Infinity } = opts
-    return this.log.createReadStream(start, end)
+    // const { start = 0, end = Infinity } = opts
+    return this.log.createReadStream(opts)
       .pipe(this.createLoadStream(opts))
   }
 
