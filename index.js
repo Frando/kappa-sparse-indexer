@@ -3,6 +3,7 @@ const { Writable, Transform } = require('stream')
 const mutex = require('mutexify')
 const debug = require('debug')('indexer')
 const pretty = require('pretty-hash')
+const collect = require('stream-collector')
 
 const Log = require('./lib/log')
 const State = require('./lib/state')
@@ -19,13 +20,18 @@ module.exports = class Indexer {
     this._logdb = sub(opts.db, 'l')
 
     this.log = new Log(this._logdb, this.name)
+
     // TODO: This is async, should it be awaited somewhere?
-    this.log.init(noop)
+    this.open(noop)
 
     this.maxBatch = opts.maxBatch || 50
     this._feeds = []
     this._watchers = []
     this._lock = mutex()
+  }
+
+  open (cb) {
+    this.log.open(cb)
   }
 
   ready (cb) {
@@ -39,6 +45,7 @@ module.exports = class Indexer {
 
   watch (fn) {
     this._watchers.push(fn)
+    return () => (this._watchers = this._watchers.filter(f => f !== fn))
   }
 
   feed (key) {
@@ -123,9 +130,8 @@ module.exports = class Indexer {
 
   createReadStream (opts = {}) {
     const { start = 0, end = Infinity } = opts
-    const rs = this.log.createReadStream(start, end)
-    if (opts.loadValue !== false) return rs.pipe(this.createLoadStream())
-    return rs
+    return this.log.createReadStream(start, end)
+      .pipe(this.createLoadStream(opts))
   }
 
   pull (start, end, opts = {}, next) {
@@ -138,36 +144,26 @@ module.exports = class Indexer {
     this.log.head((err, head) => {
       if (err) return next()
       if (start > head) return next()
-      const to = Math.min(end, head)
-      this.log.read(start, to, (err, messages) => {
-        // debug('[%s] pull: from %s to %s: %s msgs [@%s]', this.name, start, to, messages.length, head)
+      end = Math.min(end, head)
+      collect(this.createReadStream({ ...opts, start, end }), (err, messages) => {
         if (err) return next()
-        this._transform(messages, opts, messages => {
-          next({
-            messages,
-            head,
-            seq: to
-          })
+        next({
+          messages,
+          head,
+          seq: end
         })
       })
     })
   }
 
-  _transform (messages, opts, next) {
-    const self = this
-    if (!messages.length) return next(messages)
-    if (opts.filterKey) messages = messages.filter(m => opts.filterKey(m.key))
-    if (this.opts.loadValue === false) return next(messages)
-    const results = []
-    let pending = messages.length
-    messages.forEach(msg => this.loadValue(msg, done))
-    function done (err, msg) {
+  _transformMessage (message, opts, next) {
+    if (opts.filterKey && !opts.filterKey(message.key)) return next()
+    if (this.opts.loadValue === false) return next(message)
+    this.loadValue(message, (err, message) => {
       if (err) {}
-      if (msg) results.push(msg)
-      if (--pending !== 0) return
-      if (self.opts.transform) self.opts.transform(results, next)
-      else next(results)
-    }
+      if (this.opts.transform) this.opts.transform(message, next)
+      else next(message)
+    })
   }
 
   head (cb) {
@@ -208,14 +204,13 @@ module.exports = class Indexer {
     }
   }
 
-  createLoadStream () {
+  createLoadStream (opts = {}) {
     const self = this
     return new Transform({
       objectMode: true,
       transform (row, enc, next) {
-        self.loadValue(row, (err, row) => {
-          if (err) {} // TODO: Handle?
-          this.push(row)
+        self._transformMessage(row, opts, (row) => {
+          if (row) this.push(row)
           next()
         })
       }
