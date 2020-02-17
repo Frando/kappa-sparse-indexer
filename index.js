@@ -1,5 +1,5 @@
 const sub = require('subleveldown')
-const { Writable, Transform } = require('stream')
+const { Transform } = require('stream')
 const mutex = require('mutexify')
 const debug = require('debug')('indexer')
 const pretty = require('pretty-hash')
@@ -76,11 +76,10 @@ module.exports = class Indexer {
     }
   }
 
-  _appendAndFlush (key, seqs, cb) {
+  _appendFlush (key, seqs, cb) {
     if (!seqs.length) return cb()
     const rows = seqs.map(seq => [key, seq])
-    this.log.append(rows)
-    this.log.flush(() => {
+    this.log.appendFlush(rows, () => {
       // debug('[%s] feed %s appended %s', this.name, pretty(key), seqs.join(', '))
       this.onupdate()
       cb()
@@ -98,7 +97,7 @@ module.exports = class Indexer {
           seqs.push(seq)
         }
       }
-      this._appendAndFlush(key, seqs, release)
+      this._appendFlush(key, seqs, release)
     })
   }
 
@@ -109,7 +108,7 @@ module.exports = class Indexer {
       this.log.keyhead(key, (err, indexedLen) => {
         if (err) indexedLen = -1
         const seqs = range(indexedLen + 1, feedLen)
-        this._appendAndFlush(key, seqs, release)
+        this._appendFlush(key, seqs, release)
       })
     })
   }
@@ -120,7 +119,7 @@ module.exports = class Indexer {
   _ondownload (feed, seq, data) {
     this._lock(release => {
       const key = feed.key.toString('hex')
-      this._appendAndFlush(key, [seq], release)
+      this._appendFlush(key, [seq], release)
     })
   }
 
@@ -134,40 +133,23 @@ module.exports = class Indexer {
       .pipe(this.createLoadStream(opts))
   }
 
-  pull (start, end, opts = {}, next) {
-    if (typeof opts === 'function') {
-      next = opts
-      opts = {}
-    }
-
-    if (end <= start) return next()
-    this.log.head((err, head) => {
+  pull (start, end, opts, next) {
+    if (typeof opts === 'function') return this.pull(start, end, {}, opts)
+    const head = this.log.head()
+    if (start > head) return next()
+    end = Math.min(end, head)
+    collect(this.createReadStream({ ...opts, start, end }), (err, messages) => {
       if (err) return next()
-      if (start > head) return next()
-      end = Math.min(end, head)
-      collect(this.createReadStream({ ...opts, start, end }), (err, messages) => {
-        if (err) return next()
-        next({
-          messages,
-          head,
-          seq: end
-        })
+      next({
+        messages,
+        head,
+        seq: end
       })
     })
   }
 
-  _transformMessage (message, opts, next) {
-    if (opts.filterKey && !opts.filterKey(message.key)) return next()
-    if (this.opts.loadValue === false) return next(message)
-    this.loadValue(message, (err, message) => {
-      if (err) {}
-      if (this.opts.transform) this.opts.transform(message, next)
-      else next(message)
-    })
-  }
-
   head (cb) {
-    this.log.head(cb)
+    return this.log.head(cb)
   }
 
   lseqToKeyseq (lseq, cb) {
@@ -176,32 +158,6 @@ module.exports = class Indexer {
 
   keyseqToLseq (key, seq, cb) {
     this.log.keyseqToLseq(key, seq, cb)
-  }
-
-  // This can be overridden with opts.loadValue.
-  // If the materialized log contains feeds not in the active set
-  // this is required to return their values.
-  _loadValueFromOpenFeeds (key, seq, cb) {
-    if (Buffer.isBuffer(key)) key = key.toString('hex')
-    const feed = this.feed(key)
-    if (!feed) return cb()
-    feed.get(seq, { wait: false }, (err, value) => {
-      if (err) return cb(err)
-      cb(null, { value })
-    })
-  }
-
-  loadValue (message, cb) {
-    if (this.opts.loadValue) this.opts.loadValue(message.key, message.seq, onvalue)
-    else this._loadValueFromOpenFeeds(message.key, message.seq, onvalue)
-
-    function onvalue (err, value) {
-      if (err) return cb(err)
-      // TODO: This "monkey patches" the result from loadValue and the original
-      // message object with { key, seq, lseq } together. I'm not totally sure
-      // if that's what we want here, but it works well.
-      cb(null, { ...message, ...value })
-    }
   }
 
   createLoadStream (opts = {}) {
@@ -219,6 +175,41 @@ module.exports = class Indexer {
 
   source (opts) {
     return new IndexerSource(this, this._statedb, opts)
+  }
+
+  _transformMessage (message, opts, next) {
+    if (opts.filterKey && !opts.filterKey(message.key)) return next()
+    pipeline(message, [
+      (message, next) => this._loadValue(message, opts, next),
+      this.opts.transform,
+      opts.transform
+    ], next)
+  }
+
+  _loadValue (message, opts, next) {
+    const { key, seq } = message
+    if (opts.loadValue) opts.loadValue(key, seq, onvalue)
+    else if (this.opts.loadValue) this.opts.loadValue(key, seq, onvalue)
+    else if (this.opts.loadValue !== false) this._loadValueFromOpenFeeds(key, seq, onvalue)
+    else next(message)
+
+    function onvalue (err, value) {
+      if (!err && value) message = { ...message, ...value }
+      next(message)
+    }
+  }
+
+  // This can be overridden with opts.loadValue.
+  // If the materialized log contains feeds not in the active set
+  // this is required to return their values.
+  _loadValueFromOpenFeeds (key, seq, cb) {
+    if (Buffer.isBuffer(key)) key = key.toString('hex')
+    const feed = this.feed(key)
+    if (!feed) return cb()
+    feed.get(seq, { wait: false }, (err, value) => {
+      if (err) return cb(err)
+      cb(null, { value })
+    })
   }
 }
 
@@ -245,9 +236,9 @@ class IndexerSource {
     this.state.get((err, lastseq) => {
       if (err) return next()
       const end = lastseq + this.opts.maxBatch
-      const filterKey = this.opts.filterKey
-      this.idx.pull(lastseq + 1, end, { filterKey }, (result) => {
-        if (err || !result) return next()
+      const opts = { filterKey: this.opts.filterKey }
+      this.idx.pull(lastseq + 1, end, opts, (result) => {
+        if (result) return next()
         const { messages, seq, head } = result
         next({
           messages,
@@ -282,4 +273,15 @@ function range (from, to) {
     range.push(i)
   }
   return range
+}
+
+function pipeline (state, fns, final) {
+  fns = fns.filter(fn => fn)
+  next(state)
+  function next (state) {
+    const fn = fns.shift()
+    if (!fn) return final(state)
+    if (state === null) return final(state)
+    process.nextTick(fn, state, next)
+  }
 }
