@@ -11,7 +11,7 @@ const ram = require('random-access-memory')
 const peer1 = createApp('p1')
 const peer2 = createApp('p2')
 ready(peer1, peer2, example)
-async function example () {
+function example () {
   // replicate both peers in live mode.
   replicate(peer1, peer2)
 
@@ -35,31 +35,32 @@ async function example () {
         topics: ['red', 'blue']
       }
     ])
+  })
 
-    // Peer2 is still empty at this point, it's all sparse mode!
-    setTimeout(() => {
-      queryTopicsLocally(peer2, 'red', (err, result) => {
-        logResult(result, '"red" on peer2 before remote query')
-        // console.log('downloaded:', peer2.feeds.feeds().map(f => f.downloaded()))
-      })
-
+  peer1.kappa.ready(() => {
+    queryAndLog(peer2, 'red', '(on peer2 before remote query)', () => {
       // Now peer2 sends a query to its peers for some data.
-      // Comment out the next line - and see how now results below will be gone!
       peer2.remoteQuery('topics', { topic: 'red' })
-      setTimeout(() => {
-        queryTopicsLocally(peer2, 'red', (err, result) => {
-          logResult(result, '"red" on peer2 after remote query')
-          // console.log('downloaded:', peer2.feeds.feeds().map(f => f.downloaded()))
-        })
-      }, 200)
-    }, 200)
+      queryAndLog(peer2, 'red', '(on peer2 after remote query)', () => {
+        console.log('done')
+      })
+    })
   })
 
   function queryTopicsLocally (peer, topic, cb) {
     setImmediate(() => {
-      peer.kappa.view.topics.ready(() => {
+      peer.kappa.ready(() => {
         collect(peer.kappa.view.topics.query({ topic }).pipe(peer.indexer.createLoadStream()), cb)
       })
+    })
+  }
+
+  function queryAndLog (peer, topic, msg, cb) {
+    queryTopicsLocally(peer, 'red', (err, result) => {
+      logResult(result, 'query "' + topic + '" ' + msg)
+      console.log('blocks downloaded:', peer2.feeds.feeds().map(f => f.downloaded()).join(' '))
+      console.log()
+      cb()
     })
   }
 }
@@ -241,8 +242,6 @@ function keyToBuffer () {
 
 function logResult (result, msg) {
   console.log(msg)
-  console.log('------')
   let str = result.map(r => `${r.key.substring(0, 4)} @ ${r.seq} --> "${r.value.name}" (${r.value.topics.join(', ')})`).join('\n')
-  console.log(str || 'empty')
-  console.log()
+  console.log(str || '<empty>')
 }
