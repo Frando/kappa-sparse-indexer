@@ -13,6 +13,7 @@
   "license": "GPL-3.0",
   "description": "A sparse indexer for hypercores and kappa-core",
   "dependencies": {
+    "codecs": "^2.0.0",
     "debug": "^4.1.1",
     "mutexify": "^1.2.0",
     "pretty-hash": "^1.0.1",
@@ -29,6 +30,7 @@
     "level-mem": "^5.0.1",
     "multifeed": "^5.1.1",
     "nanobench": "^2.1.1",
+    "random-access-file": "^2.1.3",
     "random-access-memory": "^3.1.1",
     "tape": "^4.11.0",
     "temporary-directory": "^1.0.2"

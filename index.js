@@ -1,6 +1,7 @@
 const sub = require('subleveldown')
-const { Transform } = require('stream')
+const { Transform, PassThrough } = require('stream')
 const mutex = require('mutexify')
+const { EventEmitter } = require('events')
 const debug = require('debug')('indexer')
 const pretty = require('pretty-hash')
 const collect = require('stream-collector')
@@ -8,7 +9,7 @@ const collect = require('stream-collector')
 const Log = require('./lib/log')
 const State = require('./lib/state')
 
-const KAPPA_MAX_BATCH = 50
+const DEFAULT_MAX_BATCH = 50
 
 module.exports = class Indexer {
   constructor (opts) {
@@ -16,18 +17,30 @@ module.exports = class Indexer {
     this.name = opts.name
     this.opts = opts
 
-    this._statedb = sub(opts.db, 's')
-    this._logdb = sub(opts.db, 'l')
+    const statedb = sub(opts.db, 's')
+    const logdb = sub(opts.db, 'l')
 
-    this.log = new Log(this._logdb, this.name)
+    this.log = new Log(logdb, this.name)
+    this._state = new State(statedb, 's')
 
-    // TODO: This is async, should it be awaited somewhere?
-    this.open(noop)
-
-    this.maxBatch = opts.maxBatch || 50
     this._feeds = []
     this._watchers = []
     this._lock = mutex()
+
+    // TODO: This is async, should it be awaited somewhere?
+    this.open(noop)
+  }
+
+  createSubscription (name, opts = {}) {
+    opts.name = name
+    if (opts.persist !== false && !opts.state) {
+      opts.state = this._state.prefix(name)
+    }
+    return new Subscription(this, opts)
+  }
+
+  source (opts) {
+    return new IndexerKappaSource(this, opts)
   }
 
   open (cb) {
@@ -48,37 +61,8 @@ module.exports = class Indexer {
     return () => (this._watchers = this._watchers.filter(f => f !== fn))
   }
 
-  feed (key) {
-    if (Buffer.isBuffer(key)) key = key.toString('hex')
-    return this._feeds[key]
-  }
-
-  add (feed, opts = {}) {
-    if (feed.opened) {
-      this.addReady(feed, opts)
-    } else {
-      feed.ready(() => this.addReady(feed, opts))
-    }
-  }
-
-  addReady (feed, opts = {}) {
-    const key = feed.key.toString('hex')
-    if (this._feeds[key]) return
-    this._feeds[key] = feed
-
-    if (feed.writable) feed.on('append', () => this._onappend(feed))
-    else feed.on('download', (seq) => this._ondownload(feed, seq))
-
-    debug('[%s] feed %s (scan: %s)', this.name, pretty(key), !!opts.scan)
-
-    if (opts.scan) {
-      this._scan(feed)
-    }
-  }
-
-  _appendFlush (key, seqs, cb) {
-    if (!seqs.length) return cb()
-    const rows = seqs.map(seq => [key, seq])
+  appendFlush (rows, cb) {
+    if (!rows.length) return cb()
     this.log.appendFlush(rows, () => {
       // debug('[%s] feed %s appended %s', this.name, pretty(key), seqs.join(', '))
       this.onupdate()
@@ -86,64 +70,26 @@ module.exports = class Indexer {
     })
   }
 
-  _scan (feed) {
-    this._lock(release => {
-      const key = feed.key.toString('hex')
-      const feedLen = feed.length
-      // debug('[%s] feed %s SCAN len %s', this.name, pretty(key), feedLen)
-      const seqs = []
-      for (let seq = 0; seq < feedLen; seq++) {
-        if (feed.bitfield.get(seq)) {
-          seqs.push(seq)
-        }
-      }
-      this._appendFlush(key, seqs, release)
-    })
-  }
-
-  _onappend (feed) {
-    this._lock(release => {
-      const key = feed.key.toString('hex')
-      const feedLen = feed.length
-      this.log.keyhead(key, (err, indexedLen) => {
-        if (err) indexedLen = -1
-        const seqs = range(indexedLen + 1, feedLen)
-        this._appendFlush(key, seqs, release)
-      })
-    })
-  }
-
-  // TODO: Those can come in very fast. Possibly
-  // collecting  the records while being locked
-  // would be better.
-  _ondownload (feed, seq, data) {
-    this._lock(release => {
-      const key = feed.key.toString('hex')
-      this._appendFlush(key, [seq], release)
-    })
-  }
-
   onupdate () {
-    this._watchers.forEach(fn => fn())
+    this._watchers.forEach(fn => fn(this.head()))
   }
 
-  createReadStream (opts = {}) {
-    // const { start = 0, end = Infinity } = opts
+  createReadStream (opts) {
+    opts = this._expandOpts(opts)
     return this.log.createReadStream(opts)
       .pipe(this.createLoadStream(opts))
   }
 
-  pull (start, end, opts, next) {
-    if (typeof opts === 'function') return this.pull(start, end, {}, opts)
-    const head = this.log.head()
-    if (start > head) return next()
-    end = Math.min(end, head)
-    collect(this.createReadStream({ ...opts, start, end }), (err, messages) => {
+  read (opts, next) {
+    if (typeof opts === 'function') return this.read({}, opts)
+    opts = this._expandOpts(opts)
+    collect(this.createReadStream(opts), (err, messages) => {
       if (err) return next()
       next({
         messages,
-        head,
-        seq: end
+        cursor: opts.end,
+        finished: opts.end >= this.log.head(),
+        head: this.log.head()
       })
     })
   }
@@ -173,8 +119,12 @@ module.exports = class Indexer {
     })
   }
 
-  source (opts) {
-    return new IndexerSource(this, this._statedb, opts)
+  _expandOpts (opts = {}) {
+    if (!opts.start) opts.start = 0
+    if (!opts.end && opts.limit) opts.end = opts.start + opts.limit
+    if (opts.end && opts.end > this.log.head()) opts.end = this.log.head()
+    if (typeof opts.end === 'undefined') opts.end = this.log.head()
+    return opts
   }
 
   _transformMessage (message, opts, next) {
@@ -188,6 +138,7 @@ module.exports = class Indexer {
 
   _loadValue (message, opts, next) {
     const { key, seq } = message
+    if (opts.loadValue === false) return next(message)
     if (opts.loadValue) opts.loadValue(key, seq, onvalue)
     else if (this.opts.loadValue) this.opts.loadValue(key, seq, onvalue)
     else if (this.opts.loadValue !== false) this._loadValueFromOpenFeeds(key, seq, onvalue)
@@ -197,6 +148,73 @@ module.exports = class Indexer {
       if (!err && value) message = { ...message, ...value }
       next(message)
     }
+  }
+
+  /// Hypercore specific methods, thinking about moving these to a subclass.
+  feed (key) {
+    if (Buffer.isBuffer(key)) key = key.toString('hex')
+    return this._feeds[key]
+  }
+
+  add (feed, opts = {}) {
+    if (feed.opened) {
+      this.addReady(feed, opts)
+    } else {
+      feed.ready(() => this.addReady(feed, opts))
+    }
+  }
+
+  addReady (feed, opts = {}) {
+    const key = feed.key.toString('hex')
+    if (this._feeds[key]) return
+    this._feeds[key] = feed
+
+    if (feed.writable) feed.on('append', () => this._onappend(feed))
+    else feed.on('download', (seq) => this._ondownload(feed, seq))
+
+    debug('[%s] feed %s (scan: %s)', this.name, pretty(key), !!opts.scan)
+
+    if (opts.scan) {
+      this._scan(feed)
+    }
+  }
+
+  _scan (feed) {
+    this._lock(release => {
+      const key = feed.key.toString('hex')
+      const feedLen = feed.length
+      // debug('[%s] feed %s SCAN len %s', this.name, pretty(key), feedLen)
+      const rows = []
+      for (let seq = 0; seq < feedLen; seq++) {
+        if (feed.bitfield.get(seq)) {
+          rows.push({ key, seq })
+        }
+      }
+      this.appendFlush(rows, release)
+    })
+  }
+
+  _onappend (feed) {
+    this._lock(release => {
+      const key = feed.key.toString('hex')
+      const feedLen = feed.length
+      this.log.keyhead(key, (err, indexedLen) => {
+        if (err || indexedLen === undefined) indexedLen = -1
+        const rows = range(indexedLen + 1, feedLen).map(seq => ({ key, seq }))
+        this.appendFlush(rows, release)
+      })
+    })
+  }
+
+  // TODO: Those can come in very fast. Possibly
+  // collecting  the records while being locked
+  // would be better.
+  _ondownload (feed, seq, data) {
+    this._lock(release => {
+      const key = feed.key.toString('hex')
+      const rows = [{ key, seq }]
+      this.appendFlush(rows, release)
+    })
   }
 
   // This can be overridden with opts.loadValue.
@@ -213,52 +231,111 @@ module.exports = class Indexer {
   }
 }
 
-class IndexerSource {
-  constructor (idx, db, opts = {}) {
-    this.idx = idx
-    this.db = db
-    this.opts = opts
-    if (!this.opts.maxBatch) this.opts.maxBatch = KAPPA_MAX_BATCH
+class Subscription {
+  constructor (source, opts) {
+    this.source = source
+    this.state = opts.state || new State(opts.db || null)
+    this.name = opts.name
+    this.opts = {
+      filterKey: opts.filterKey,
+      loadValue: opts.loadValue,
+      transform: opts.transform,
+      limit: opts.limit || opts.maxBatch || DEFAULT_MAX_BATCH
+    }
   }
 
-  ready (cb) {
-    this.idx.ready(cb)
+  watch (fn) {
+    return this.source.watch(fn)
   }
 
-  open (flow, next) {
-    this.name = flow.name
-    this.state = new State(this.db, this.name)
-    this.idx.watch(() => flow.update())
-    next()
+  ready (fn) {
+    this.source.ready(fn)
   }
 
-  pull (next) {
-    this.state.get((err, lastseq) => {
+  setCursor (seq, cb) {
+    this.state.put(seq, cb)
+  }
+
+  setVersion (version, cb) {
+    this.state.putVersion(version, cb)
+  }
+
+  read (opts, next) {
+    if (typeof opts === 'function') return this.read({}, opts)
+    this._expandOpts(opts, (err, opts) => {
       if (err) return next()
-      const end = lastseq + this.opts.maxBatch
-      const opts = { filterKey: this.opts.filterKey }
-      this.idx.pull(lastseq + 1, end, opts, (result) => {
-        if (result) return next()
-        const { messages, seq, head } = result
+      this.source.read(opts, (result) => {
+        if (!result) return next()
         next({
-          messages,
-          finished: seq === head,
-          onindexed: cb => this.state.put(seq, cb)
+          ...result,
+          ack: cb => this.setCursor(result.cursor, cb)
         })
       })
     })
   }
 
-  get reset () { return this.state.reset }
-  get storeVersion () { return this.state.storeVersion }
-  get fetchVersion () { return this.state.fetchVersion }
+  createReadStream (opts = {}) {
+    const proxy = PassThrough()
+    this._expandOpts(opts, (err, opts) => {
+      if (err) return proxy.destroy(err)
+      this.source.createReadStream(opts).pipe(proxy)
+    })
+    return proxy
+  }
+
+  _expandOpts (opts, cb) {
+    this.state.get((err, cursor) => {
+      if (err) return cb(err)
+      const readOpts = {
+        ...this.opts,
+        ...opts,
+        start: cursor + 1
+      }
+      cb(null, readOpts)
+    })
+  }
+}
+
+class IndexerKappaSource {
+  constructor (indexer, opts) {
+    this.idx = indexer
+    this.opts = opts
+  }
+
+  open (flow, next) {
+    this.name = flow.name
+    this.subscription = this.idx.createSubscription('kappa:' + this.name, this.opts)
+    this.subscription.watch(() => flow.update())
+    next()
+  }
+
+  pull (next) {
+    this.subscription.read(result => {
+      if (!result) return next()
+      next({
+        messages: result.messages,
+        finished: result.finished,
+        onindexed: cb => this.subscription.setCursor(result.cursor, cb)
+      })
+    })
+  }
+
+  reset () {
+    this.subscription.state.reset()
+  }
+  storeVersion (version, cb) {
+    this.subscription.state.storeVersion(version, cb)
+  }
+  fetchVersion (cb) {
+    this.subscription.state.fetchVersion(cb)
+  }
+
   get api () {
     const self = this
     return {
       ready (kappa, cb) {
-        self.ready(cb)
-      },
-      indexer: self.idx
+        self.subscription.ready(cb)
+      }
     }
   }
 }
