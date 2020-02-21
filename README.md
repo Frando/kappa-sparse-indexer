@@ -17,9 +17,43 @@ More docs to come soon! For now check out the example (will also be expanded soo
 Create a new indexer. `leveldb` must be a [level](https://github.com/Level/level) instance (or compatible). `opts` are:
 
 * `name: string` A name (for debugging purposes only)
+* `loadValue: function` A callback to load a value from a `(key, seq)` pair
 
 #### `indexer.add(feed, opts)
 
 Add a feed to the indexer. Opts are:
 
 * `scan: false` Set to true to scan for undownloaded blocks initially.
+
+### `indexer.createReadStream({ start: 0, end: Infinity, limit })
+
+Create a read stream on the combined log. Messages emitted look like this:
+```
+{
+  key: "hex-encoded key of a feed",
+  seq: Number, // The seq of this message in its feed
+  lseq: Number, // The "local seq" of this message in the materialized log
+  value: object // The value if opts.loadValue isn't false
+}
+```
+
+### `indexer.read({ start, end, limit }, cb)`
+
+Similar to `createReadStream` but collect messages and calls cb with `(err, result)`, where `result` is:
+```
+{
+  messages, // Array of messages
+  cursor: Number, // The last lseq of the batch of messages,
+  finished: bool, // true if there are no more messages to read after this batch
+}
+```
+
+### `indexer.source()`
+
+Create a source for a kappa-core@experimental
+
+### `indexer.createSubscription()`
+
+Create a stateful subscription (where each read call returns the same as above plus an `ack` function that when called advances the cursor so that the next read call returns the next batch of messages).
+
+
