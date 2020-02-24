@@ -19,11 +19,15 @@ module.exports = class Indexer {
     const statedb = sub(opts.db, 's')
     const logdb = sub(opts.db, 'l')
 
-    this.log = new Log(logdb, this.name)
-    this._state = new State(statedb, 's')
+    let loadValue = opts.loadValue
+    if (loadValue !== false && typeof loadValue !== 'function') {
+      loadValue = this._loadValueFromOpenFeeds.bind(this)
+    }
+
+    this._log = opts.log || new Log(logdb, { name: this.name, loadValue })
+    this._state = new State(statedb)
 
     this._feeds = []
-    this._watchers = []
     this._downloadQueue = []
     this._lock = mutex()
 
@@ -44,110 +48,48 @@ module.exports = class Indexer {
   }
 
   open (cb) {
-    this.log.open(cb)
+    this._log.open(cb)
   }
 
   ready (cb) {
+    this.sync(cb)
+  }
+
+  sync (cb) {
     // Acquire a lock so that running ops are finished, and release right away.
     this._lock(release => release(cb))
   }
 
   get length () {
-    return this.log.length
+    return this._log.length
   }
 
   watch (fn) {
-    this._watchers.push(fn)
-    return () => (this._watchers = this._watchers.filter(f => f !== fn))
-  }
-
-  appendFlush (rows, cb) {
-    if (!rows.length) return cb()
-    this.log.appendFlush(rows, () => {
-      // debug('[%s] feed %s appended %s', this.name, pretty(key), seqs.join(', '))
-      this.onupdate()
-      cb()
-    })
-  }
-
-  onupdate () {
-    this._watchers.forEach(fn => fn(this.head()))
+    this._log.watch(fn)
   }
 
   createReadStream (opts) {
-    opts = this._expandOpts(opts)
-    return this.log.createReadStream(opts)
-      .pipe(this.createLoadStream(opts))
+    return this._log.createReadStream(opts)
   }
 
-  read (opts, next) {
-    if (typeof opts === 'function') return this.read({}, opts)
-    opts = this._expandOpts(opts)
-    collect(this.createReadStream(opts), (err, messages) => {
-      if (err) return next({ error: err })
-      next({
-        messages,
-        cursor: opts.end,
-        finished: opts.end >= this.log.head(),
-        head: this.log.head()
-      })
-    })
+  read (opts, cb) {
+    this._log.read(opts, cb)
   }
 
   head (cb) {
-    return this.log.head(cb)
+    return this._log.head(cb)
   }
 
   lseqToKeyseq (lseq, cb) {
-    this.log.lseqToKeyseq(lseq, cb)
+    this._log.lseqToKeyseq(lseq, cb)
   }
 
   keyseqToLseq (key, seq, cb) {
-    this.log.keyseqToLseq(key, seq, cb)
+    this._log.keyseqToLseq(key, seq, cb)
   }
 
-  createLoadStream (opts = {}) {
-    const self = this
-    return new Transform({
-      objectMode: true,
-      transform (row, _enc, next) {
-        self._transformMessage(row, opts, (row) => {
-          if (row) this.push(row)
-          next()
-        })
-      }
-    })
-  }
-
-  _expandOpts (opts = {}) {
-    if (!opts.start) opts.start = 0
-    if (!opts.end && opts.limit) opts.end = opts.start + opts.limit
-    if (opts.end && opts.end > this.log.head()) opts.end = this.log.head()
-    if (typeof opts.end === 'undefined') opts.end = this.log.head()
-    return opts
-  }
-
-  _transformMessage (message, opts, next) {
-    if (opts.filterKey && !opts.filterKey(message.key)) return next()
-    pipeline(message, [
-      (message, next) => this._loadValue(message, opts, next),
-      this.opts.transform,
-      opts.transform
-    ], next)
-  }
-
-  _loadValue (message, opts, next) {
-    const { key, seq } = message
-    if (opts.loadValue === false) return next(message)
-    if (opts.loadValue) opts.loadValue(key, seq, onvalue)
-    else if (this.opts.loadValue) this.opts.loadValue(key, seq, onvalue)
-    else if (this.opts.loadValue !== false) this._loadValueFromOpenFeeds(key, seq, onvalue)
-    else next(message)
-
-    function onvalue (err, value) {
-      if (!err && value) message = { ...message, ...value }
-      next(message)
-    }
+  createLoadStream (opts) {
+    return this._log.createLoadStream(opts)
   }
 
   /// Hypercore specific methods, thinking about moving these to a subclass.
@@ -156,7 +98,7 @@ module.exports = class Indexer {
     return this._feeds[key]
   }
 
-  add (feed, opts = {}) {
+  add (feed, opts) {
     if (feed.opened) {
       this.addReady(feed, opts)
     } else {
@@ -190,7 +132,7 @@ module.exports = class Indexer {
           rows.push({ key, seq })
         }
       }
-      this.appendFlush(rows, release)
+      this._log.appendFlush(rows, release)
     })
   }
 
@@ -198,10 +140,10 @@ module.exports = class Indexer {
     this._lock(release => {
       const key = feed.key.toString('hex')
       const feedLen = feed.length
-      this.log.keyhead(key, (err, indexedLen) => {
+      this._log.keyhead(key, (err, indexedLen) => {
         if (err || indexedLen === undefined) indexedLen = -1
         const rows = range(indexedLen + 1, feedLen).map(seq => ({ key, seq }))
-        this.appendFlush(rows, release)
+        this._log.appendFlush(rows, release)
       })
     })
   }
@@ -213,20 +155,21 @@ module.exports = class Indexer {
       if (!this._downloadQueue.length) return release()
       const rows = this._downloadQueue
       this._downloadQueue = []
-      this.appendFlush(rows, release)
+      this._log.appendFlush(rows, release)
     })
   }
 
   // This can be overridden with opts.loadValue.
   // If the materialized log contains feeds not in the active set
   // this is required to return their values.
-  _loadValueFromOpenFeeds (key, seq, cb) {
-    if (Buffer.isBuffer(key)) key = key.toString('hex')
+  _loadValueFromOpenFeeds (message, next) {
+    const { key, seq } = message
     const feed = this.feed(key)
-    if (!feed) return cb()
+    if (!feed) return next(message)
     feed.get(seq, { wait: false }, (err, value) => {
-      if (err) return cb(err)
-      cb(null, { value })
+      // TODO: Handle error somehow?
+      if (err) return next(message)
+      next({ ...message, value })
     })
   }
 }
@@ -249,7 +192,8 @@ class Subscription {
   }
 
   sync (fn) {
-    this.source.ready(fn)
+    if (this.source.sync) this.source.sync(fn)
+    else fn()
   }
 
   setCursor (seq, cb) {
@@ -265,24 +209,32 @@ class Subscription {
   }
 
   createReadStream (opts) {
-    this.source.createReadStream(opts)
+    return this.source.createReadStream(opts)
   }
 
   pull (opts, next) {
     if (typeof opts === 'function') return this.pull({}, opts)
     this._expandOpts(opts, (opts) => {
-      this.read(opts, (result) => {
-        console.log('read done', result)
-        next({
-          ...result,
-          ack: cb => this.setCursor(result.cursor, cb)
-        })
+      this.read(opts, (err, messages) => {
+        const result = {
+          messages,
+          head: this.source.head(),
+          finished: true,
+          cursor: opts.start
+        }
+        if (!err && messages.length) {
+          result.cursor = messages[messages.length - 1].lseq
+          result.finished = result.cursor >= result.head
+        }
+        if (err) return next({ ...result, error: err })
+        result.ack = cb => this.setCursor(result.cursor, cb)
+        next(result)
       })
     })
   }
 
   createPullStream (opts = {}) {
-    const proxy = PassThrough()
+    const proxy = PassThrough({ objectMode: true })
     this._expandOpts(opts, (opts) => {
       this.createReadStream(opts).pipe(proxy)
     })
@@ -339,15 +291,4 @@ function range (from, to) {
     range.push(i)
   }
   return range
-}
-
-function pipeline (state, fns, final) {
-  fns = fns.filter(fn => fn)
-  next(state)
-  function next (state) {
-    const fn = fns.shift()
-    if (!fn) return final(state)
-    if (state === null) return final(state)
-    process.nextTick(fn, state, next)
-  }
 }
