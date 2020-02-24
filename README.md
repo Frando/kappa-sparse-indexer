@@ -48,12 +48,11 @@ Similar to `createReadStream` but collect messages and calls cb with `(err, resu
 }
 ```
 
-### `indexer.source()`
-
-Create a source for a kappa-core@experimental
-
 ### `indexer.createSubscription()`
 
 Create a stateful subscription (where each read call returns the same as above plus an `ack` function that when called advances the cursor so that the next read call returns the next batch of messages).
 
 
+### `indexer.source()`
+
+Create a source for a [kappa-core@experimental](https://github.com/Frando/kappa-core/tree/experimental). Similar to `createSubscription` but with a little boilerplate so that it can be passed directly into `kappa.use`

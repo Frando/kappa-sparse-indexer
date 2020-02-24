@@ -1,7 +1,6 @@
 const sub = require('subleveldown')
 const { Transform, PassThrough } = require('stream')
 const mutex = require('mutexify')
-const { EventEmitter } = require('events')
 const debug = require('debug')('indexer')
 const pretty = require('pretty-hash')
 const collect = require('stream-collector')
@@ -25,6 +24,7 @@ module.exports = class Indexer {
 
     this._feeds = []
     this._watchers = []
+    this._downloadQueue = []
     this._lock = mutex()
 
     // TODO: This is async, should it be awaited somewhere?
@@ -84,7 +84,7 @@ module.exports = class Indexer {
     if (typeof opts === 'function') return this.read({}, opts)
     opts = this._expandOpts(opts)
     collect(this.createReadStream(opts), (err, messages) => {
-      if (err) return next()
+      if (err) return next({ error: err })
       next({
         messages,
         cursor: opts.end,
@@ -110,7 +110,7 @@ module.exports = class Indexer {
     const self = this
     return new Transform({
       objectMode: true,
-      transform (row, enc, next) {
+      transform (row, _enc, next) {
         self._transformMessage(row, opts, (row) => {
           if (row) this.push(row)
           next()
@@ -206,13 +206,13 @@ module.exports = class Indexer {
     })
   }
 
-  // TODO: Those can come in very fast. Possibly
-  // collecting  the records while being locked
-  // would be better.
-  _ondownload (feed, seq, data) {
+  _ondownload (feed, seq, _data) {
+    const key = feed.key.toString('hex')
+    this._downloadQueue.push({ key, seq })
     this._lock(release => {
-      const key = feed.key.toString('hex')
-      const rows = [{ key, seq }]
+      if (!this._downloadQueue.length) return release()
+      const rows = this._downloadQueue
+      this._downloadQueue = []
       this.appendFlush(rows, release)
     })
   }
@@ -248,7 +248,7 @@ class Subscription {
     return this.source.watch(fn)
   }
 
-  ready (fn) {
+  sync (fn) {
     this.source.ready(fn)
   }
 
@@ -261,11 +261,18 @@ class Subscription {
   }
 
   read (opts, next) {
-    if (typeof opts === 'function') return this.read({}, opts)
-    this._expandOpts(opts, (err, opts) => {
-      if (err) return next()
-      this.source.read(opts, (result) => {
-        if (!result) return next()
+    this.source.read(opts, next)
+  }
+
+  createReadStream (opts) {
+    this.source.createReadStream(opts)
+  }
+
+  pull (opts, next) {
+    if (typeof opts === 'function') return this.pull({}, opts)
+    this._expandOpts(opts, (opts) => {
+      this.read(opts, (result) => {
+        console.log('read done', result)
         next({
           ...result,
           ack: cb => this.setCursor(result.cursor, cb)
@@ -274,24 +281,24 @@ class Subscription {
     })
   }
 
-  createReadStream (opts = {}) {
+  createPullStream (opts = {}) {
     const proxy = PassThrough()
-    this._expandOpts(opts, (err, opts) => {
-      if (err) return proxy.destroy(err)
-      this.source.createReadStream(opts).pipe(proxy)
+    this._expandOpts(opts, (opts) => {
+      this.createReadStream(opts).pipe(proxy)
     })
+    proxy.ack = (cursor, cb) => this.setCursor(cursor, cb)
     return proxy
   }
 
-  _expandOpts (opts, cb) {
+  _expandOpts (opts, next) {
     this.state.get((err, cursor) => {
-      if (err) return cb(err)
+      if (err) return next(opts)
       const readOpts = {
         ...this.opts,
         ...opts,
         start: cursor + 1
       }
-      cb(null, readOpts)
+      next(readOpts)
     })
   }
 }
@@ -306,37 +313,19 @@ class IndexerKappaSource {
     this.name = flow.name
     this.subscription = this.idx.createSubscription('kappa:' + this.name, this.opts)
     this.subscription.watch(() => flow.update())
+    this.reset = this.subscription.state.reset
+    this.storeVersion = this.subscription.state.storeVersion
+    this.fetchVersion = this.subscription.state.fetchVersion
     next()
   }
 
   pull (next) {
-    this.subscription.read(result => {
-      if (!result) return next()
+    this.subscription.pull(result => {
       next({
-        messages: result.messages,
-        finished: result.finished,
-        onindexed: cb => this.subscription.setCursor(result.cursor, cb)
+        ...result,
+        onindexed: cb => result.ack(cb)
       })
     })
-  }
-
-  reset () {
-    this.subscription.state.reset()
-  }
-  storeVersion (version, cb) {
-    this.subscription.state.storeVersion(version, cb)
-  }
-  fetchVersion (cb) {
-    this.subscription.state.fetchVersion(cb)
-  }
-
-  get api () {
-    const self = this
-    return {
-      ready (kappa, cb) {
-        self.subscription.ready(cb)
-      }
-    }
   }
 }
 
