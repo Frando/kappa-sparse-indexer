@@ -55,7 +55,7 @@ tape('replicate', t => {
   })
 })
 
-tape.only('live', t => {
+tape('live', t => {
   const feed1 = hypercore(ram)
   const feed2 = hypercore(ram)
   const feedRemote = hypercore(ram)
