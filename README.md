@@ -17,7 +17,7 @@ Create a new indexer. `leveldb` must be a [level](https://github.com/Level/level
 * `name: string` A name (for debugging purposes only)
 * `loadValue: function` A callback to load a value from a `(key, seq)` pair. Required if the log does not always contain the exact same set of feeds. If set to false, skip value loading completely.
 
-#### `indexer.add(feed, opts)
+#### `indexer.add(feed, opts)`
 
 Add a feed to the indexer. Opts are:
 
@@ -25,7 +25,7 @@ Add a feed to the indexer. Opts are:
 
 *TODO: An `onwrite` hook set in feed construction would be the safest way to not ever have to use `scan`. When not ever using `scan`, the log's `deduplicate` opt could be set to false, improving performance.
 
-#### `indexer.createReadStream({ start: 0, end: Infinity, limit, live: false })
+#### `indexer.createReadStream({ start: 0, end: Infinity, limit, live: false })`
 
 Create a read stream on the local materialized log. Messages emitted look like this:
 ```
