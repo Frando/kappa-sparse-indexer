@@ -2,10 +2,13 @@ const multifeed = require('multifeed')
 const Query = require('hypercore-query-extension')
 const Kappa = require('kappa-core')
 const Indexer = require('.')
+const sub = require('subleveldown')
+const hypercore = require('hypercore')
 const mem = require('level-mem')
 const { Transform, Writable } = require('stream')
 const collect = require('stream-collector')
 const ram = require('random-access-memory')
+const pretty = require('pretty-hash')
 
 // example
 const peer1 = createApp('p1')
@@ -34,34 +37,54 @@ function example () {
         timestamp: Date.now() - 3600 * 24 * 30 * 2,
         topics: ['red', 'blue']
       }
-    ])
+    ], startQueries)
   })
 
-  peer1.kappa.ready(() => {
-    queryAndLog(peer2, 'red', '(on peer2 before remote query)', () => {
+  async function startQueries (go) {
+    try {
+      await queryAndLog(peer1, 'red', '(on peer1)')
+      await queryAndLog(peer2, 'red', '(on peer2 before remote query)')
       // Now peer2 sends a query to its peers for some data.
       peer2.remoteQuery('topics', { topic: 'red' })
-      queryAndLog(peer2, 'red', '(on peer2 after remote query)', () => {
-        console.log('done')
-      })
-    })
-  })
+      await new Promise(resolve => setImmediate(resolve))
+      await queryAndLog(peer2, 'red', '(on peer2 after remote query)')
+      console.log('done')
+    } catch (err) { console.error(err) }
+  }
 
-  function queryTopicsLocally (peer, topic, cb) {
-    setImmediate(() => {
-      peer.kappa.ready(() => {
-        collect(peer.kappa.view.topics.query({ topic }).pipe(peer.indexer.createLoadStream()), cb)
+  function queryAndLog (peer, topic, msg) {
+    return new Promise((resolve, reject) => {
+      queryTopicsLocally(peer, 'red', (err, result) => {
+        if (err) return console.error(err)
+        logResult(result, `query "${topic}" ${msg}:`, logFeeds(peer))
+        resolve()
       })
     })
   }
 
-  function queryAndLog (peer, topic, msg, cb) {
-    queryTopicsLocally(peer, 'red', (err, result) => {
-      logResult(result, 'query "' + topic + '" ' + msg)
-      console.log('blocks downloaded:', peer2.feeds.feeds().map(f => f.downloaded()).join(' '))
-      console.log()
-      cb()
+  function queryTopicsLocally (peer, topic, cb) {
+    peer.kappa.ready(() => {
+      collect(
+        peer.kappa.view.topics.query({ topic })
+          .pipe(peer.indexer.createLoadStream()),
+        cb
+      )
     })
+  }
+
+  function logResult (result, prefix, suffix) {
+    let str = result.map(r => (
+      `  ${pretty(r.key)}@${r.seq}: "${r.value.name}", (${r.value.topics.join(', ')})`
+    )).join('\n')
+    console.log(`${prefix}\n${str || '  no results'}`)
+    if (suffix) console.log(suffix)
+    console.log()
+  }
+
+  function logFeeds (peer) {
+    return 'Feeds: \n' + Object.values(peer.feeds._feeds).map(feed => {
+      return `  Key: ${pretty(feed.key)} Len: ${feed.length} Blocks: ${feed.downloaded()}`
+    }).join('\n')
   }
 }
 
@@ -233,15 +256,10 @@ function keyToBuffer () {
   return new Transform({
     objectMode: true,
     transform (row, enc, next) {
-      row.key = Buffer.from(row.key, 'hex')
-      this.push(row)
+      const key = Buffer.from(row.key, 'hex')
+      const seq = row.seq
+      this.push({ key, seq })
       next()
     }
   })
-}
-
-function logResult (result, msg) {
-  console.log(msg)
-  let str = result.map(r => `${r.key.substring(0, 4)} @ ${r.seq} --> "${r.value.name}" (${r.value.topics.join(', ')})`).join('\n')
-  console.log(str || '<empty>')
 }
