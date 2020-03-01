@@ -57,7 +57,9 @@ module.exports = class Indexer {
 
   sync (cb) {
     // Acquire a lock so that running ops are finished, and release right away.
-    this._lock(release => release(cb))
+    this._lock(release => {
+      release(cb)
+    })
   }
 
   get length () {
@@ -259,6 +261,10 @@ class IndexerKappaSource {
   constructor (indexer, opts) {
     this.idx = indexer
     this.opts = opts
+  }
+
+  ready (cb) {
+    this.idx.ready(cb)
   }
 
   open (flow, next) {
