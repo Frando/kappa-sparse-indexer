@@ -21,10 +21,10 @@ tape('log', t => {
       log2.open(() => {
         console.log('opened')
         check(log2, 'reopen', () => {
-          const rs = db.createReadStream()
-          rs.on('data', console.log)
-          rs.on('end', () => t.end())
-          // t.end()
+          // const rs = db.createReadStream()
+          // rs.on('data', console.log)
+          // rs.on('end', () => t.end())
+          t.end()
         })
       })
     })
@@ -33,7 +33,6 @@ tape('log', t => {
   function check (log, msg, cb) {
     log.read({ start: 2, end: 4 }, (err, res) => {
       t.error(err, msg + ' no err')
-      console.log(res)
       res = res.map(r => r.key + r.seq).join(' ')
       t.equal(res, 'B5 C2 C1', msg + ' read ok')
       log.keyheads((err, heads) => {
