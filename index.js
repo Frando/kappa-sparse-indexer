@@ -182,11 +182,11 @@ class Subscription {
     this.state = opts.state || new State(opts.db || null)
     this.name = opts.name
     this.opts = {
-      filterKey: opts.filterKey,
-      loadValue: opts.loadValue,
-      transform: opts.transform,
       limit: opts.limit || opts.maxBatch || DEFAULT_MAX_BATCH
     }
+    if (opts.filterKey) this.opts.filterKey = opts.filterKey
+    if (opts.loadValue) this.opts.loadValue = opts.loadValue
+    if (opts.transform) this.opts.transform = opts.transform
   }
 
   watch (fn) {
@@ -216,13 +216,14 @@ class Subscription {
 
   pull (opts, next) {
     if (typeof opts === 'function') return this.pull({}, opts)
-    this._expandOpts(opts, (opts) => {
-      this.read(opts, (err, messages) => {
+    this.state.get((err, cursor) => {
+      if (err) cursor = 0
+      const readOpts = { ...this.opts, ...opts, start: cursor + 1 }
+      this.read(readOpts, (err, messages) => {
         const result = {
           messages,
-          head: this.source.head(),
           finished: true,
-          cursor: opts.start
+          cursor
         }
         if (!err && messages.length) {
           result.cursor = messages[messages.length - 1].lseq
@@ -237,23 +238,13 @@ class Subscription {
 
   createPullStream (opts = {}) {
     const proxy = PassThrough({ objectMode: true })
-    this._expandOpts(opts, (opts) => {
-      this.createReadStream(opts).pipe(proxy)
+    this.state.get((err, cursor) => {
+      if (err) cursor = 0
+      const readOpts = { ...this.opts, ...opts, start: cursor + 1 }
+      this.createReadStream(readOpts).pipe(proxy)
     })
     proxy.ack = (cursor, cb) => this.setCursor(cursor, cb)
     return proxy
-  }
-
-  _expandOpts (opts, next) {
-    this.state.get((err, cursor) => {
-      if (err) return next(opts)
-      const readOpts = {
-        ...this.opts,
-        ...opts,
-        start: cursor + 1
-      }
-      next(readOpts)
-    })
   }
 }
 
