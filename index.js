@@ -214,6 +214,23 @@ class Subscription {
     this.source.read(opts, next)
   }
 
+  getState (cb) {
+    const info = {
+      totalBlocks: this.source.length
+    }
+    let pending = 2
+    this.state.get((err, state) => {
+      if (err) return cb(err)
+      info.indexedBlocks = state
+      if (--pending === 0) cb(null, info)
+    })
+    this.state.fetchVersion((err, version) => {
+      if (err) return cb(err)
+      info.version = version
+      if (--pending === 0) cb(null, info)
+    })
+  }
+
   createReadStream (opts) {
     return this.source.createReadStream(opts)
   }
