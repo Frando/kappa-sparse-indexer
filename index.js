@@ -261,7 +261,7 @@ class Subscription {
     const proxy = PassThrough({ objectMode: true })
     this.state.get((err, cursor) => {
       if (err) cursor = 0
-      const readOpts = { ...this.opts, ...opts, start: cursor + 1 }
+      const readOpts = { ...this.opts, limit: Infinity, ...opts, start: cursor + 1 }
       this.createReadStream(readOpts).pipe(proxy)
     })
     proxy.ack = (cursor, cb) => this.setCursor(cursor, cb)
