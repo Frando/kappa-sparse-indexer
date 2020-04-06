@@ -30,17 +30,21 @@ module.exports = class Indexer {
     this._feeds = []
     this._downloadQueue = []
     this._lock = mutex()
+    this._subscriptions = {}
 
     // TODO: This is async, should it be awaited somewhere?
     this.open(noop)
   }
 
   createSubscription (name, opts = {}) {
-    opts.name = name
-    if (opts.persist !== false && !opts.state) {
-      opts.state = this._state.prefix(name)
+    if (!this._subscriptions[name]) {
+      if (opts.persist !== false && !opts.state) {
+        opts.state = this._state.prefix(name)
+      }
+      opts.name = name
+      this._subscriptions[name] = new Subscription(this, opts)
     }
-    return new Subscription(this, opts)
+    return this._subscriptions[name]
   }
 
   source (opts) {
