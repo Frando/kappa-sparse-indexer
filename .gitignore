@@ -3,3 +3,5 @@ package-lock.json
 pnpm-*
 _old
 SANDBOX
+shrinkwrap.yaml
+yarn.lock

@@ -1,6 +1,6 @@
 {
   "name": "kappa-sparse-indexer",
-  "version": "0.5.1",
+  "version": "0.5.4",
   "main": "index.js",
   "directories": {
     "lib": "lib"
