@@ -1,4 +1,5 @@
 const sub = require('subleveldown')
+const { EventEmitter } = require('events')
 const { Transform, PassThrough } = require('stream')
 const mutex = require('mutexify')
 const debug = require('debug')('indexer')
@@ -10,8 +11,9 @@ const State = require('./lib/state')
 
 const DEFAULT_MAX_BATCH = 50
 
-module.exports = class Indexer {
+module.exports = class Indexer extends EventEmitter {
   constructor (opts) {
+    super()
     // The name is, at the moment, only for debug purposes.
     this.name = opts.name
     this.opts = opts
@@ -31,6 +33,8 @@ module.exports = class Indexer {
     this._downloadQueue = []
     this._lock = mutex()
     this._subscriptions = {}
+
+    this._log.watch(() => this.emit('update'))
 
     // TODO: This is async, should it be awaited somewhere?
     this.open(noop)
