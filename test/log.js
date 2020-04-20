@@ -35,6 +35,7 @@ tape('log', t => {
       t.error(err, msg + ' no err')
       res = res.map(r => r.key + r.seq).join(' ')
       t.equal(res, 'B5 C2 C1', msg + ' read ok')
+      t.equal(log.length, 5)
       log.keyheads((err, heads) => {
         t.error(err)
         t.deepEqual(heads, { A: 1, B: 5, C: 2 }, msg + ' keyheads ok')
