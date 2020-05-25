@@ -8,7 +8,8 @@ const collect = require('stream-collector')
 const ram = require('random-access-memory')
 
 const tape = require('tape')
-const { runAll, ready, replicate } = require('./lib/util')
+const { createTopicsView, createRecentView } = require('./lib/views')
+const { runAll, replicate } = require('./lib/util')
 
 tape('demo app', t => {
   const peer1 = createApp('p1')
@@ -190,66 +191,6 @@ function downloadBlocks (feeds) {
     write (row, enc, next) {
       const feed = feeds.feed(row.key)
       if (feed) feed.download(Number(row.seq))
-      next()
-    }
-  })
-}
-
-function createTopicsView (db) {
-  return {
-    filter (msgs, next) {
-      next(msgs.filter(msg => msg.value && msg.value.topics))
-    },
-    map (msgs, next) {
-      const ops = msgs.reduce((agg, msg) => {
-        return agg.concat(msg.value.topics.map(topic => ({
-          type: 'put',
-          key: topic + '/' + msg.key + '@' + msg.seq,
-          value: ''
-        })))
-      }, [])
-      db.batch(ops, next)
-    },
-    api: {
-      query (kappa, query) {
-        const { topic } = query
-        const opts = { gte: topic + '/', lt: topic + '/' + '\uFFFF' }
-        return db.createReadStream(opts).pipe(keyseqFromKey())
-      }
-    }
-  }
-}
-
-function createRecentView (db) {
-  return {
-    filter (msgs, next) {
-      next(msgs.filter(msg => msg.value && msg.value.timestamp))
-    },
-    map (msgs, next) {
-      const ops = msgs.map(msg => ({
-        type: 'put',
-        key: msg.value.timestamp + '/' + msg.key + '@' + msg.seq,
-        value: ''
-      }))
-      db.batch(ops, next)
-    },
-    api: {
-      query (kappa, query) {
-        const { timestamp } = query
-        const opts = { gt: timestamp + '/', lt: timestamp + '/' + '\uFFFF' }
-        return db.createReadStream(opts).pipe(keyseqFromKey())
-      }
-    }
-  }
-}
-
-function keyseqFromKey () {
-  return new Transform({
-    objectMode: true,
-    transform (msg, enc, next) {
-      const keyseq = msg.key.split('/')[1]
-      const [key, seq] = keyseq.split('@')
-      this.push({ key, seq: Number(seq) })
       next()
     }
   })
