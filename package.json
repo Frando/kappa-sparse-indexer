@@ -13,10 +13,10 @@
   "license": "GPL-3.0",
   "description": "A sparse indexer for hypercores and kappa-core",
   "dependencies": {
-    "codecs": "^2.0.0",
+    "codecs": "^2.1.0",
     "debug": "^4.1.1",
     "level-live": "github:Frando/level-live#key-encodings",
-    "mutexify": "^1.2.0",
+    "mutexify": "^1.3.0",
     "pretty-hash": "^1.0.1",
     "stream-collector": "^1.0.1",
     "subleveldown": "^4.1.4",
@@ -24,17 +24,17 @@
     "varint": "^5.0.0"
   },
   "devDependencies": {
-    "hypercore": "^8.7.0",
-    "hypercore-query-extension": "^1.2.0",
-    "kappa-core": "github:Frando/kappa-core#exp-0.1.3",
-    "level": "^6.0.0",
+    "hypercore": "^9.1.0",
+    "hypercore-query-extension": "^1.3.0",
+    "kappa-core": "github:Frando/kappa-core#exp-0.2.3",
+    "level": "^6.0.1",
     "level-mem": "^5.0.1",
-    "multifeed": "^5.1.1",
+    "multifeed": "^5.2.2",
     "nanobench": "^2.1.1",
     "pump": "^3.0.0",
-    "random-access-file": "^2.1.3",
+    "random-access-file": "^2.1.4",
     "random-access-memory": "^3.1.1",
-    "tape": "^4.11.0",
+    "tape": "^5.0.1",
     "temporary-directory": "^1.0.2"
   }
 }
