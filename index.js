@@ -194,7 +194,6 @@ class Subscription {
     }
     if (opts.filterKey) this.opts.filterKey = opts.filterKey
     if (opts.loadValue) this.opts.loadValue = opts.loadValue
-    if (opts.transform) this.opts.transform = opts.transform
   }
 
   watch (fn) {
