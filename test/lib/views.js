@@ -1,4 +1,5 @@
 const { Transform } = require('stream')
+const debug = require('debug')('view')
 
 module.exports = {
   createTopicsView,
@@ -11,6 +12,7 @@ function createTopicsView (db) {
       next(msgs.filter(msg => msg.value && msg.value.topics))
     },
     map (msgs, next) {
+      debug('map', msgs)
       const ops = msgs.reduce((agg, msg) => {
         return agg.concat(msg.value.topics.map(topic => ({
           type: 'put',
@@ -22,6 +24,7 @@ function createTopicsView (db) {
     },
     api: {
       query (kappa, query) {
+        if (typeof query === 'string') query = { topic: query }
         const { topic } = query
         const opts = { gte: topic + '/', lt: topic + '/' + '\uFFFF' }
         return db.createReadStream(opts).pipe(splitKeyseqStream())

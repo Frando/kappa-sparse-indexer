@@ -24,6 +24,7 @@
     "varint": "^5.0.0"
   },
   "devDependencies": {
+    "corestore": "^5.3.2",
     "hypercore": "^9.1.0",
     "hypercore-query-extension": "^1.3.0",
     "kappa-core": "github:Frando/kappa-core#exp-0.2.3",
