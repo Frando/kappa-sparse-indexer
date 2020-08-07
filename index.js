@@ -55,6 +55,10 @@ module.exports = class Indexer extends EventEmitter {
     return new IndexerKappaSource(this, opts)
   }
 
+  createSource (opts) {
+    return this.source(opts)
+  }
+
   open (cb) {
     this._log.open(cb)
   }

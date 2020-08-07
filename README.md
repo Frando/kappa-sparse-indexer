@@ -15,7 +15,7 @@ See [example.js](example.js) for a full example on how this can be used with [hy
 Create a new indexer. `leveldb` must be a [level](https://github.com/Level/level) instance (or compatible). `opts` are:
 
 * `name: string` A name (for debugging purposes only)
-* `loadValue: function` A callback to load a value from a `(key, seq)` pair. Required if the log does not always contain the exact same set of feeds. If set to false, skip value loading completely.
+* `loadValue: function (message, next)` A callback to load a value from message object `{ key, seq, lseq }`. Call `next` with the updated message object. If unset and if a feed `key` was added to the indexer, will get the block from that feed and add as `value` to the message object. If set to false value loading will be skipped.
 
 #### `indexer.add(feed, opts)`
 
