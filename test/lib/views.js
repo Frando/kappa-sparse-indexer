@@ -23,7 +23,7 @@ function createTopicsView (db) {
       db.batch(ops, next)
     },
     api: {
-      query (kappa, query) {
+      query (query) {
         if (typeof query === 'string') query = { topic: query }
         const { topic } = query
         const opts = { gte: topic + '/', lt: topic + '/' + '\uFFFF' }
@@ -47,7 +47,7 @@ function createRecentView (db) {
       db.batch(ops, next)
     },
     api: {
-      query (kappa, query) {
+      query (query) {
         const { timestamp } = query
         const opts = { gt: timestamp + '/', lt: timestamp + '/' + '\uFFFF' }
         return db.createReadStream(opts).pipe(splitKeyseqStream())

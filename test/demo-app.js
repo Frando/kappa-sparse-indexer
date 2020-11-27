@@ -137,8 +137,8 @@ function createApp (name) {
   const kappa = new Kappa()
   // We define two views. Both should be filled with everything
   // from our indexer.
-  kappa.use('recent', indexer.source(), createRecentView(dbs.recent))
-  kappa.use('topics', indexer.source(), createTopicsView(dbs.topics))
+  kappa.use('recent', indexer.createSource(), createRecentView(dbs.recent))
+  kappa.use('topics', indexer.createSource(), createTopicsView(dbs.topics))
 
   // Now, because we start in sparse mode, we need to ask our peers for
   // data. We use hypercore-query-extension for this. There, we

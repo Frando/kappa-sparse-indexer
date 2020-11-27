@@ -5,13 +5,28 @@ const mutex = require('mutexify')
 const debug = require('debug')('indexer')
 const pretty = require('pretty-hash')
 const collect = require('stream-collector')
+const Nanoresource = require('nanoresource/emitter')
 
 const Log = require('./lib/log')
 const State = require('./lib/state')
 
 const DEFAULT_MAX_BATCH = 50
 
-module.exports = class Indexer extends EventEmitter {
+function HypercoreIndexer (opts = {}) {
+  if (opts.loadValue !== false && !opts.loadValue) {
+    opts.loadValue = (...args) => {
+      feedWatcher._loadValueFromOpenFeeds(...args)
+    }
+  }
+  const indexer = new Indexer(opts)
+  const feedWatcher = new HypercoreWatcher(indexer)
+  indexer.feed = feedWatcher.feed.bind(feedWatcher)
+  indexer.add = feedWatcher.add.bind(feedWatcher)
+  indexer.addReady = feedWatcher.addReady.bind(feedWatcher)
+  return indexer
+}
+
+class Indexer extends Nanoresource {
   constructor (opts) {
     super()
     // The name is, at the moment, only for debug purposes.
@@ -21,16 +36,11 @@ module.exports = class Indexer extends EventEmitter {
     const statedb = sub(opts.db, 's')
     const logdb = sub(opts.db, 'l')
 
-    let loadValue = opts.loadValue
-    if (loadValue !== false && typeof loadValue !== 'function') {
-      loadValue = this._loadValueFromOpenFeeds.bind(this)
-    }
+    const loadValue = opts.loadValue
 
     this._log = opts.log || new Log(logdb, { name: this.name, loadValue })
     this._state = new State(statedb)
 
-    this._feeds = []
-    this._downloadQueue = []
     this._lock = mutex()
     this._subscriptions = {}
 
@@ -42,24 +52,39 @@ module.exports = class Indexer extends EventEmitter {
 
   createSubscription (name, opts = {}) {
     if (!this._subscriptions[name]) {
+      opts.name = name
       if (opts.persist !== false && !opts.state) {
         opts.state = this._state.prefix(name)
       }
-      opts.name = name
       this._subscriptions[name] = new Subscription(this, opts)
     }
     return this._subscriptions[name]
   }
 
-  source (opts) {
+  createSource (opts) {
     return new IndexerKappaSource(this, opts)
   }
 
-  createSource (opts) {
-    return this.source(opts)
+  createInputView () {
+    const self = this
+    return {
+      map (messages, next) {
+        const rows = messages.map(message => {
+          let key
+          if (isNaN(message.seq)) return null
+          const seq = +message.seq
+          if (Buffer.isBuffer(message.key)) key = message.key.toString('hex')
+          if (typeof message.key === 'string') key = message.key
+          if (!key) return null
+          return { key, seq }
+        }).filter(message => message)
+
+        self.append(rows, next)
+      }
+    }
   }
 
-  open (cb) {
+  _open (cb) {
     this._log.open(cb)
   }
 
@@ -94,6 +119,10 @@ module.exports = class Indexer extends EventEmitter {
     return this._log.head(cb)
   }
 
+  keyhead (key, cb) {
+    this._log.keyhead(key, cb)
+  }
+
   lseqToKeyseq (lseq, cb) {
     this._log.lseqToKeyseq(lseq, cb)
   }
@@ -104,6 +133,30 @@ module.exports = class Indexer extends EventEmitter {
 
   createLoadStream (opts) {
     return this._log.createLoadStream(opts)
+  }
+
+  append (rows, cb) {
+    this._lock(release => {
+      this._log.appendFlush(rows, err => {
+        release(cb, err)
+      })
+    })
+  }
+
+  appendUnlocked (rows, cb) {
+    this._log.appendFlush(rows, cb)
+  }
+
+  lock (cb, ...args) {
+    this._lock(cb, ...args)
+  }
+}
+
+class HypercoreWatcher {
+  constructor (indexer) {
+    this.indexer = indexer
+    this._feeds = {}
+    this._downloadQueue = []
   }
 
   /// Hypercore specific methods, thinking about moving these to a subclass.
@@ -128,7 +181,7 @@ module.exports = class Indexer extends EventEmitter {
     if (feed.writable) feed.on('append', () => this._onappend(feed))
     else feed.on('download', (seq) => this._ondownload(feed, seq))
 
-    debug('[%s] feed %s (scan: %s)', this.name, pretty(key), !!opts.scan)
+    debug('[%s] add feed %s (scan: %s)', this.name, pretty(key), !!opts.scan)
 
     if (opts.scan) {
       this._scan(feed)
@@ -136,28 +189,65 @@ module.exports = class Indexer extends EventEmitter {
   }
 
   _scan (feed) {
+    const self = this
+    const key = feed.key.toString('hex')
+    const feedLen = feed.length
+
+    if (!feedLen) return
+
     this._lock(release => {
-      const key = feed.key.toString('hex')
-      const feedLen = feed.length
-      // debug('[%s] feed %s SCAN len %s', this.name, pretty(key), feedLen)
       const rows = []
-      for (let seq = 0; seq < feedLen; seq++) {
-        if (feed.bitfield.get(seq)) {
-          rows.push({ key, seq })
+      // Native hypercores have a bitfield, which we can access synchronously.
+      if (feed.bitfield) {
+        onbitfield(feed.bitfield)
+      // Remote hpercores don't (yet) have this bitfield, so we have to check
+      // each seq manually.
+      } else {
+        scanManual()
+      }
+
+      function onbitfield (bitfield) {
+        // debug('[%s] feed %s SCAN len %s', this.name, pretty(key), feedLen)
+        for (let seq = 0; seq < feedLen; seq++) {
+          if (bitfield.get(seq)) {
+            rows.push({ key, seq })
+          }
+        }
+        append()
+      }
+
+      // Scan manually (call has for each seq), asynchronously.
+      // This is here for hyperspace compatibility until we can get
+      // a feed's bitfield over the hyperspace RPC interface.
+      function scanManual () {
+        let pending = feedLen
+        for (let seq = 0; seq < feedLen; seq++) {
+          feed.has(seq, onhas.bind(null, seq))
+        }
+        function onhas (seq, err, has) {
+          if (has) rows.push({ key, seq })
+          if (--pending === 0) append()
         }
       }
-      this._log.appendFlush(rows, release)
+
+      function append () {
+        self.indexer.appendUnlocked(rows, release)
+      }
     })
+  }
+
+  _lock (cb, ...args) {
+    this.indexer.lock(cb, ...args)
   }
 
   _onappend (feed) {
     this._lock(release => {
       const key = feed.key.toString('hex')
       const feedLen = feed.length
-      this._log.keyhead(key, (err, indexedLen) => {
+      this.indexer.keyhead(key, (err, indexedLen) => {
         if (err || indexedLen === undefined) indexedLen = -1
         const rows = range(indexedLen + 1, feedLen).map(seq => ({ key, seq }))
-        this._log.appendFlush(rows, release)
+        this.indexer.appendUnlocked(rows, release)
       })
     })
   }
@@ -169,7 +259,7 @@ module.exports = class Indexer extends EventEmitter {
       if (!this._downloadQueue.length) return release()
       const rows = this._downloadQueue
       this._downloadQueue = []
-      this._log.appendFlush(rows, release)
+      this.indexer.appendUnlocked(rows, release)
     })
   }
 
@@ -210,7 +300,14 @@ class Subscription {
   }
 
   setCursor (seq, cb) {
-    this.state.put(seq, cb)
+    this.state.put(seq, err => {
+      if (err) return cb(err)
+      if (!cb) return
+      cb(null, {
+        indexedBlocks: seq,
+        totalBlocks: this.source.length
+      })
+    })
   }
 
   setVersion (version, cb) {
@@ -248,6 +345,7 @@ class Subscription {
       if (err) cursor = 0
       const readOpts = { ...this.opts, ...opts, start: cursor + 1 }
       this.read(readOpts, (err, messages) => {
+        if (err) return next(err)
         const result = {
           messages,
           finished: true,
@@ -257,9 +355,8 @@ class Subscription {
           result.cursor = messages[messages.length - 1].lseq
           result.finished = result.cursor >= result.head
         }
-        if (err) return next({ ...result, error: err })
         result.ack = cb => this.setCursor(result.cursor, cb)
-        next(result)
+        next(null, result)
       })
     })
   }
@@ -278,17 +375,17 @@ class Subscription {
 
 class IndexerKappaSource {
   constructor (indexer, opts) {
-    this.idx = indexer
+    this.indexer = indexer
     this.opts = opts
   }
 
   ready (cb) {
-    this.idx.ready(cb)
+    this.indexer.ready(cb)
   }
 
   open (flow, next) {
     this.name = flow.name
-    this.subscription = this.idx.createSubscription('kappa:' + this.name, this.opts)
+    this.subscription = this.indexer.createSubscription('kappa:' + this.name, this.opts)
     this.subscription.watch(() => flow.update())
     this.reset = this.subscription.state.reset
     this.storeVersion = this.subscription.state.storeVersion
@@ -297,11 +394,9 @@ class IndexerKappaSource {
   }
 
   pull (next) {
-    this.subscription.pull(result => {
-      next({
-        ...result,
-        onindexed: cb => result.ack(cb)
-      })
+    this.subscription.pull((err, result) => {
+      if (err) return next(err)
+      next(null, result.messages, result.finished, result.ack)
     })
   }
 }
@@ -310,10 +405,14 @@ function noop () {}
 
 // from inclusive, to exclusive
 function range (from, to) {
-  let range = []
+  const range = []
   if (!(to > from)) return range
   for (let i = from; i < to; i++) {
     range.push(i)
   }
   return range
 }
+
+module.exports = HypercoreIndexer
+module.exports.Indexer = Indexer
+module.exports.HypercoreWatcher = HypercoreWatcher

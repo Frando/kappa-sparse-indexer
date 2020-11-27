@@ -9,10 +9,8 @@ tape('scan', t => {
   const feed1 = hypercore(ram)
   const indexer1 = new Indexer(mem())
   feed1.append(['foo', 'bar'], () => {
-    console.log('appended')
     indexer1.add(feed1, { scan: true })
     indexer1.sync(() => {
-      console.log('ready')
       indexer1.read((err, messages) => {
         t.error(err)
         t.equal(messages.length, 2)

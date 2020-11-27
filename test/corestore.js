@@ -32,14 +32,14 @@ tape('corestore indexed multi view', async t => {
   const kappa = new Kappa()
   kappa.use('index',
     createCorestoreSource({ db: mem(), store }),
-    indexer.createView()
+    indexer.createInputView()
   )
   kappa.use('topics',
     indexer.createSource(),
     createTopicsView(mem())
   )
   kappa.on('state-update', (name, state) => {
-    console.log('state update', name, state)
+    // console.log('state update', name, state)
   })
   await store.ready()
   const feed = store.get()
@@ -47,18 +47,18 @@ tape('corestore indexed multi view', async t => {
   await append(feed, { name: 'bob', topics: ['blue', 'red'] })
   const feed2 = store.get()
   await append(feed2, { name: 'claire', topics: ['green', 'red'] })
-  console.log('appended', feed)
-  console.log('before')
+  // console.log('appended', feed)
+  // console.log('before')
   await ready(kappa, 'index')
   await ready(kappa, 'topics')
-  console.log('after')
+  // console.log('after')
 
   setTimeout(() => {
     append(feed2, { name: 'diego', topics: ['pink', 'green'] })
   }, 10)
 
-  const key = feed.key.toString('hex')
-  const key2 = feed2.key.toString('hex')
+  // const key = feed.key.toString('hex')
+  // const key2 = feed2.key.toString('hex')
 
   const reds = await collect(
     kappa.api.topics.query('red').pipe(indexer.createLoadStream())
