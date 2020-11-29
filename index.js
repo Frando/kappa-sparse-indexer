@@ -150,6 +150,31 @@ class Indexer extends Nanoresource {
   lock (cb, ...args) {
     this._lock(cb, ...args)
   }
+
+  resolveBlock (req, cb) {
+    if (!empty(req.lseq) && empty(req.seq)) {
+      this.lseqToKeyseq(req.lseq, (err, keyseq) => {
+        if (!err && keyseq) {
+          req.key = keyseq.key
+          req.seq = keyseq.seq
+        }
+        finish(req)
+      })
+    } else if (empty(req.lseq)) {
+      this.keyseqToLseq(req.key, req.seq, (err, lseq) => {
+        if (!err && lseq) req.lseq = lseq
+        finish(req)
+      })
+    } else finish(req)
+
+    function finish (req) {
+      if (empty(req.key) || empty(req.seq)) return cb(new Error('Cannot resolve request'))
+      req.seq = parseInt(req.seq)
+      if (!empty(req.lseq)) req.lseq = parseInt(req.lseq)
+      if (Buffer.isBuffer(req.key)) req.key = req.key.toString('hex')
+      cb(null, req)
+    }
+  }
 }
 
 class HypercoreWatcher {
@@ -411,6 +436,10 @@ function range (from, to) {
     range.push(i)
   }
   return range
+}
+
+function empty (value) {
+  return value === undefined || value === null
 }
 
 module.exports = HypercoreIndexer
