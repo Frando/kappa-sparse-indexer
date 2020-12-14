@@ -88,6 +88,15 @@ class Indexer extends Nanoresource {
     this._log.open(cb)
   }
 
+  _close (cb) {
+    this._lock(release => {
+      for (const subscription of Object.values(this._subscriptions)) {
+        subscription.close()
+      }
+      release(cb)
+    })
+  }
+
   ready (cb) {
     this.sync(cb)
   }
@@ -315,6 +324,11 @@ class Subscription {
     if (opts.loadValue) this.opts.loadValue = opts.loadValue
   }
 
+  close () {
+    if (this.closed) return
+    this.closed = true
+  }
+
   watch (fn) {
     return this.source.watch(fn)
   }
@@ -339,8 +353,9 @@ class Subscription {
     this.state.putVersion(version, cb)
   }
 
-  read (opts, next) {
-    this.source.read(opts, next)
+  read (opts, cb) {
+    if (this.closed) return cb(new Error('Subscription closed'))
+    this.source.read(opts, cb)
   }
 
   getState (cb) {
@@ -366,6 +381,7 @@ class Subscription {
 
   pull (opts, next) {
     if (typeof opts === 'function') return this.pull({}, opts)
+    if (this.closed) return next(new Error('Subscription closed'))
     this.state.get((err, cursor) => {
       if (err) cursor = 0
       const readOpts = { ...this.opts, ...opts, start: cursor + 1 }
