@@ -12,6 +12,14 @@ const State = require('./lib/state')
 
 const DEFAULT_MAX_BATCH = 50
 
+class NotFoundError extends Error {
+  constructor (message) {
+    super(message)
+    this.notFound = true
+    this.code = 'ENOENT'
+  }
+}
+
 function HypercoreIndexer (opts = {}) {
   if (opts.loadValue !== false && !opts.loadValue) {
     opts.loadValue = (...args) => {
@@ -177,7 +185,7 @@ class Indexer extends Nanoresource {
     } else finish(req)
 
     function finish (req) {
-      if (empty(req.key) || empty(req.seq)) return cb(new Error('Cannot resolve request'))
+      if (empty(req.key) || empty(req.seq)) return cb(new NotFoundError('Block not found'))
       req.seq = parseInt(req.seq)
       if (!empty(req.lseq)) req.lseq = parseInt(req.lseq)
       if (Buffer.isBuffer(req.key)) req.key = req.key.toString('hex')

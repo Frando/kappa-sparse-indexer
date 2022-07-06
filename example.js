@@ -1,6 +1,6 @@
 const multifeed = require('multifeed')
 const Query = require('hypercore-query-extension')
-const Kappa = require('kappa-core')
+const Kappa = require('@frando/kappa-core')
 const Indexer = require('.')
 const sub = require('subleveldown')
 const hypercore = require('hypercore')
