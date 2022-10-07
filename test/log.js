@@ -19,7 +19,6 @@ tape('log', t => {
       //   t.end()
       // })
       log2.open(() => {
-        console.log('opened')
         check(log2, 'reopen', () => {
           // const rs = db.createReadStream()
           // rs.on('data', console.log)

@@ -92,8 +92,8 @@ class Indexer extends Nanoresource {
     return cb.promise
   }
 
-  async ready () {
-    await this.sync()
+  ready (cb) {
+    return this.sync(cb)
   }
 
   sync (cb) {
@@ -165,7 +165,7 @@ class Indexer extends Nanoresource {
     cb = maybeCallback(cb)
     this.lock(release => {
       this._log.appendFlush(rows, err => {
-        debug('[%s] appended %s rows', this.indexer.name, rows.length)
+        debug('[%s] appended %s rows', this.name, rows.length)
         release(cb, err)
       })
     }, 'append')
@@ -493,7 +493,6 @@ class Subscription {
     this.state.get((err, cursor) => {
       if (err) cursor = 0
       const readOpts = { ...this.opts, limit: Infinity, ...opts, start: cursor + 1 }
-      console.log('x', opts, readOpts)
       this.createReadStream(readOpts).pipe(proxy)
     })
     proxy.ack = (cursor, cb) => this.setCursor(cursor, cb)
@@ -508,7 +507,7 @@ class IndexerKappaSource {
   }
 
   ready (cb) {
-    this.indexer.ready(cb)
+    return this.indexer.ready(cb)
   }
 
   open (flow, next) {
