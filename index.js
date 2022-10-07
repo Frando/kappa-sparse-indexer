@@ -1,14 +1,13 @@
 const sub = require('subleveldown')
-const { EventEmitter } = require('events')
-const { Transform, PassThrough } = require('stream')
+const { PassThrough } = require('streamx')
 const mutex = require('mutexify')
 const debug = require('debug')('indexer')
 const pretty = require('pretty-hash')
-const collect = require('stream-collector')
 const Nanoresource = require('nanoresource/emitter')
 
 const Log = require('./lib/log')
 const State = require('./lib/state')
+const { maybeCallback, loggingMutex } = require('./lib/util')
 
 const DEFAULT_MAX_BATCH = 50
 
@@ -20,25 +19,11 @@ class NotFoundError extends Error {
   }
 }
 
-function HypercoreIndexer (opts = {}) {
-  if (opts.loadValue !== false && !opts.loadValue) {
-    opts.loadValue = (...args) => {
-      feedWatcher._loadValueFromOpenFeeds(...args)
-    }
-  }
-  const indexer = new Indexer(opts)
-  const feedWatcher = new HypercoreWatcher(indexer)
-  indexer.feed = feedWatcher.feed.bind(feedWatcher)
-  indexer.add = feedWatcher.add.bind(feedWatcher)
-  indexer.addReady = feedWatcher.addReady.bind(feedWatcher)
-  return indexer
-}
-
 class Indexer extends Nanoresource {
   constructor (opts) {
     super()
     // The name is, at the moment, only for debug purposes.
-    this.name = opts.name
+    this.name = opts.name || (Math.random() + 1).toString(36).substring(7)
     this.opts = opts
 
     const statedb = sub(opts.db, 's')
@@ -49,7 +34,7 @@ class Indexer extends Nanoresource {
     this._log = opts.log || new Log(logdb, { name: this.name, loadValue })
     this._state = new State(statedb)
 
-    this._lock = mutex()
+    this._lock = loggingMutex(mutex(), 'indexer')
     this._subscriptions = {}
 
     this._log.watch(() => this.emit('update'))
@@ -92,28 +77,32 @@ class Indexer extends Nanoresource {
     }
   }
 
-  _open (cb) {
-    this._log.open(cb)
+  async _open () {
+    await this._log.open()
   }
 
   _close (cb) {
-    this._lock(release => {
+    cb = maybeCallback(cb)
+    this.lock(release => {
       for (const subscription of Object.values(this._subscriptions)) {
         subscription.close()
       }
       release(cb)
-    })
+    }, 'close')
+    return cb.promise
   }
 
-  ready (cb) {
-    this.sync(cb)
+  async ready () {
+    await this.sync()
   }
 
   sync (cb) {
+    cb = maybeCallback(cb)
     // Acquire a lock so that running ops are finished, and release right away.
-    this._lock(release => {
+    this.lock(release => {
       release(cb)
-    })
+    }, 'sync')
+    return cb.promise
   }
 
   get length () {
@@ -125,27 +114,47 @@ class Indexer extends Nanoresource {
   }
 
   createReadStream (opts) {
-    return this._log.createReadStream(opts)
+    const self = this
+    const stream = this._log.createReadStream({
+      ...opts,
+      open (cb) {
+        if (opts.sync === undefined || opts.sync) {
+          self.lock(release => release(cb), 'readStream')
+        } else cb()
+      }
+    })
+    return stream
   }
 
   read (opts, cb) {
+    if (!opts) opts = {}
+    cb = maybeCallback(cb)
     this._log.read(opts, cb)
+    return cb.promise
   }
 
   head (cb) {
-    return this._log.head(cb)
+    cb = maybeCallback(cb)
+    this._log.head(cb)
+    return cb.promise
   }
 
   keyhead (key, cb) {
+    cb = maybeCallback(cb)
     this._log.keyhead(key, cb)
+    return cb.promise
   }
 
   lseqToKeyseq (lseq, cb) {
+    cb = maybeCallback(cb)
     this._log.lseqToKeyseq(lseq, cb)
+    return cb.promise
   }
 
   keyseqToLseq (key, seq, cb) {
+    cb = maybeCallback(cb)
     this._log.keyseqToLseq(key, seq, cb)
+    return cb.promise
   }
 
   createLoadStream (opts) {
@@ -153,22 +162,48 @@ class Indexer extends Nanoresource {
   }
 
   append (rows, cb) {
-    this._lock(release => {
+    cb = maybeCallback(cb)
+    this.lock(release => {
       this._log.appendFlush(rows, err => {
+        debug('[%s] appended %s rows', this.indexer.name, rows.length)
         release(cb, err)
       })
-    })
+    }, 'append')
+    return cb.promise
   }
 
   appendUnlocked (rows, cb) {
-    this._log.appendFlush(rows, cb)
+    cb = maybeCallback(cb)
+    this._log.appendFlush((rows), (err) => {
+      debug('[%s] appended %s rows', this.name, rows.length)
+      cb(err)
+    })
+    return cb.promise
   }
 
-  lock (cb, ...args) {
-    this._lock(cb, ...args)
+  lock (cb, name) {
+    cb = maybeCallback(cb)
+    this._lock(cb, name)
+    return cb.promise
+    // debugLock('want', name)
+    // this._lock((release, ...args) => {
+    //   debugLock('hold', name)
+    //   const release2 = (...args) => {
+    //     debugLock('free', name)
+    //     release(...args)
+    //   }
+    //   cb(release2, ...args)
+    // })
+    // return cb.promise
   }
 
   resolveBlock (req, cb) {
+    cb = maybeCallback(cb)
+    this._resolveBlock(req, cb)
+    return cb.promise
+  }
+
+  _resolveBlock (req, cb) {
     if (!empty(req.lseq) && empty(req.seq)) {
       this.lseqToKeyseq(req.lseq, (err, keyseq) => {
         if (!err && keyseq) {
@@ -211,7 +246,7 @@ class HypercoreWatcher {
     if (feed.opened) {
       this.addReady(feed, opts)
     } else {
-      feed.ready(() => this.addReady(feed, opts))
+      feed.ready().then(() => this.addReady(feed, opts))
     }
   }
 
@@ -220,8 +255,9 @@ class HypercoreWatcher {
     if (this._feeds[key]) return
     this._feeds[key] = feed
 
-    if (feed.writable) feed.on('append', () => this._onappend(feed))
-    else feed.on('download', (seq) => this._ondownload(feed, seq))
+    const session = feed.session()
+    if (feed.writable) session.on('append', () => this._onappend(feed))
+    else session.on('download', (seq) => this._ondownload(feed, seq))
 
     debug('[%s] add feed %s (scan: %s)', this.name, pretty(key), !!opts.scan)
 
@@ -240,14 +276,16 @@ class HypercoreWatcher {
     this._lock(release => {
       const rows = []
       // Native hypercores have a bitfield, which we can access synchronously.
-      if (feed.bitfield) {
-        onbitfield(feed.bitfield)
+      // TODO: Upgrade v10
+      if (feed.core.bitfield) {
+        onbitfield(feed.core.bitfield)
       // Remote hpercores don't (yet) have this bitfield, so we have to check
       // each seq manually.
       } else {
         scanManual()
       }
 
+      // TODO: Upgrade v10
       function onbitfield (bitfield) {
         // debug('[%s] feed %s SCAN len %s', this.name, pretty(key), feedLen)
         for (let seq = 0; seq < feedLen; seq++) {
@@ -264,7 +302,7 @@ class HypercoreWatcher {
       function scanManual () {
         let pending = feedLen
         for (let seq = 0; seq < feedLen; seq++) {
-          feed.has(seq, onhas.bind(null, seq))
+          feed.has().then(has => onhas(seq, null, has), err => onhas(seq, err))
         }
         function onhas (seq, err, has) {
           if (has) rows.push({ key, seq })
@@ -275,11 +313,13 @@ class HypercoreWatcher {
       function append () {
         self.indexer.appendUnlocked(rows, release)
       }
-    })
+    }, 'watcher:scan')
   }
 
   _lock (cb, ...args) {
+    cb = maybeCallback(cb)
     this.indexer.lock(cb, ...args)
+    return cb.promise
   }
 
   _onappend (feed) {
@@ -291,7 +331,7 @@ class HypercoreWatcher {
         const rows = range(indexedLen + 1, feedLen).map(seq => ({ key, seq }))
         this.indexer.appendUnlocked(rows, release)
       })
-    })
+    }, 'watcher:onappend')
   }
 
   _ondownload (feed, seq, _data) {
@@ -302,7 +342,7 @@ class HypercoreWatcher {
       const rows = this._downloadQueue
       this._downloadQueue = []
       this.indexer.appendUnlocked(rows, release)
-    })
+    }, 'watcher:ondownload')
   }
 
   // This can be overridden with opts.loadValue.
@@ -312,11 +352,35 @@ class HypercoreWatcher {
     const { key, seq } = message
     const feed = this.feed(key)
     if (!feed) return next(message)
-    feed.get(seq, { wait: false }, (err, value) => {
-      // TODO: Handle error somehow?
-      if (err) return next(message)
-      next({ ...message, value })
-    })
+    feed.get(seq, { wait: false })
+      .then(value => {
+        next({ ...message, value })
+      })
+      .catch(() => next(message))
+  }
+}
+
+class HypercoreIndexer extends Indexer {
+  constructor (opts = {}) {
+    if (opts.loadValue !== false && !opts.loadValue) {
+      opts.loadValue = (...args) => {
+        this.feedWatcher._loadValueFromOpenFeeds(...args)
+      }
+    }
+    super(opts)
+    this.feedWatcher = new HypercoreWatcher(this)
+  }
+
+  feed (key) {
+    return this.feedWatcher.feed(key)
+  }
+
+  add (feed, opts) {
+    return this.feedWatcher.add(feed, opts)
+  }
+
+  addReady (feed, opts) {
+    return this.feedWatcher.addReady(feed, opts)
   }
 }
 
@@ -347,6 +411,12 @@ class Subscription {
   }
 
   setCursor (seq, cb) {
+    cb = maybeCallback(cb)
+    this._setCursor(seq, cb)
+    return cb.promise
+  }
+
+  _setCursor (seq, cb) {
     this.state.put(seq, err => {
       if (err) return cb(err)
       if (!cb) return
@@ -358,15 +428,20 @@ class Subscription {
   }
 
   setVersion (version, cb) {
+    cb = maybeCallback(cb)
     this.state.putVersion(version, cb)
+    return cb.promise
   }
 
   read (opts, cb) {
+    cb = maybeCallback(cb)
     if (this.closed) return cb(new Error('Subscription closed'))
     this.source.read(opts, cb)
+    return cb.promise
   }
 
   getState (cb) {
+    cb = maybeCallback(cb)
     const info = {
       totalBlocks: this.source.length
     }
@@ -381,6 +456,7 @@ class Subscription {
       info.version = version
       if (--pending === 0) cb(null, info)
     })
+    return cb.promise
   }
 
   createReadStream (opts) {
@@ -388,6 +464,7 @@ class Subscription {
   }
 
   pull (opts, next) {
+    next = maybeCallback(next)
     if (typeof opts === 'function') return this.pull({}, opts)
     if (this.closed) return next(new Error('Subscription closed'))
     this.state.get((err, cursor) => {
@@ -408,13 +485,15 @@ class Subscription {
         next(null, result)
       })
     })
+    return next.promise
   }
 
   createPullStream (opts = {}) {
-    const proxy = PassThrough({ objectMode: true })
+    const proxy = new PassThrough({ objectMode: true })
     this.state.get((err, cursor) => {
       if (err) cursor = 0
       const readOpts = { ...this.opts, limit: Infinity, ...opts, start: cursor + 1 }
+      console.log('x', opts, readOpts)
       this.createReadStream(readOpts).pipe(proxy)
     })
     proxy.ack = (cursor, cb) => this.setCursor(cursor, cb)
