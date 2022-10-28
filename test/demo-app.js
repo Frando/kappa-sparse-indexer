@@ -1,5 +1,5 @@
-const multifeed = require('multifeed')
-const Query = require('hypercore-query-extension')
+// const multifeed = require('multifeed')
+// const Query = require('hypercore-query-extension')
 const Kappa = require('@frando/kappa-core')
 const Indexer = require('..')
 const mem = require('level-mem')
@@ -11,7 +11,7 @@ const tape = require('tape')
 const { createTopicsView, createRecentView } = require('./lib/views')
 const { runAll, replicate } = require('./lib/util')
 
-tape('demo app', t => {
+tape.skip('demo app', t => {
   const peer1 = createApp('p1')
   const peer2 = createApp('p2')
   runAll([

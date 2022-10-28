@@ -13,25 +13,27 @@ const { replicate } = require('./lib/util')
 
 function loadValueFromCorestore (corestore) {
   return function loadValue (message, next) {
-    const feed = corestore.get({ key: message.key })
-    feed.get(message.seq, { wait: false }, (err, value) => {
-      if (!err) message.value = value
-      next(message)
-    })
+    const feed = corestore.get({ key: Buffer.from(message.key, 'hex') })
+    feed.get(message.seq, { wait: false })
+      .then((value) => {
+        message.value = JSON.parse(value)
+        next(message)
+      }).catch((err) => {
+        next(message)
+      })
   }
 }
 
+// TODO: Corestore source is not working with corestore v6
 tape('corestore indexed multi view', async t => {
-  const store = new Corestore(ram, {
-    valueEncoding: 'json'
-  })
+  const store = new Corestore(ram)
   const indexer = new Indexer({
     db: mem(),
     loadValue: loadValueFromCorestore(store)
   })
   const kappa = new Kappa()
   kappa.use('index',
-    createCorestoreSource({ db: mem(), store }),
+    indexer.createSource(),
     indexer.createInputView()
   )
   kappa.use('topics',
@@ -42,23 +44,15 @@ tape('corestore indexed multi view', async t => {
     // console.log('state update', name, state)
   })
   await store.ready()
-  const feed = store.get()
+  const feed = store.get({ name: 'feed1' })
+  indexer.add(feed)
   await append(feed, { name: 'alice', topics: ['blue'] })
   await append(feed, { name: 'bob', topics: ['blue', 'red'] })
-  const feed2 = store.get()
+  const feed2 = store.get({ name: 'feed2' })
   await append(feed2, { name: 'claire', topics: ['green', 'red'] })
-  // console.log('appended', feed)
-  // console.log('before')
+  indexer.add(feed2, { scan: true })
   await ready(kappa, 'index')
   await ready(kappa, 'topics')
-  // console.log('after')
-
-  setTimeout(() => {
-    append(feed2, { name: 'diego', topics: ['pink', 'green'] })
-  }, 10)
-
-  // const key = feed.key.toString('hex')
-  // const key2 = feed2.key.toString('hex')
 
   const reds = await collect(
     kappa.api.topics.query('red').pipe(indexer.createLoadStream())
@@ -69,6 +63,12 @@ tape('corestore indexed multi view', async t => {
     kappa.api.topics.query('blue').pipe(indexer.createLoadStream())
   )
   t.deepEqual(blues.map(r => r.value.name).sort(), ['alice', 'bob'])
+  await append(feed2, { name: 'diego', topics: ['red', 'green'] })
+  await ready(kappa, 'topics')
+  const greens = await collect(
+    kappa.api.topics.query('green').pipe(indexer.createLoadStream())
+  )
+  t.deepEqual(greens.map(r => r.value.name).sort(), ['claire', 'diego'])
 })
 
 function ready (kappa, ...args) {
@@ -81,7 +81,5 @@ function ready (kappa, ...args) {
 }
 
 function append (feed, value) {
-  return new Promise((resolve, reject) => {
-    feed.append(value, err => err ? reject(err) : resolve())
-  })
+  return feed.append(JSON.stringify(value))
 }

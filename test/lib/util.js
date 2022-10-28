@@ -14,10 +14,9 @@ exports.runAll = function runAll (ops) {
   })
 }
 
-exports.replicate = function replicate (a, b, opts, cb) {
+exports.replicate = function replicate (a, b, opts) {
   if (typeof opts === 'function') return replicate(a, b, null, opts)
   if (!opts) opts = { live: true }
   const stream = a.replicate(true, opts)
   stream.pipe(b.replicate(false, opts)).pipe(stream)
-  if (cb) setImmediate(cb)
 }
